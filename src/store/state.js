@@ -17,7 +17,4 @@ export default {
         //     ]
         // },
     },
-    my: {
-        form: {},
-    },
 };
