@@ -53,14 +53,19 @@ jobs:
 
   rust-check:
     name: Rust check
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.0-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            curl pkg-config \
+            libwebkit2gtk-4.0-dev libgtk-3-dev libappindicator3-dev \
+            librsvg2-dev patchelf
 
       - uses: dtolnay/rust-toolchain@stable
 
