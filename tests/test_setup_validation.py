@@ -13,8 +13,8 @@ class TestInfrastructureSetup:
     def test_project_structure_exists(self):
         """Test that the required project structure is in place."""
         # Check that main packages exist
-        assert Path("damai").exists(), "damai package directory should exist"
-        assert Path("damai_appium").exists(), "damai_appium package directory should exist"
+        assert Path("web").exists(), "web package directory should exist"
+        assert Path("mobile").exists(), "mobile package directory should exist"
         
         # Check that test directories exist
         assert Path("tests").exists(), "tests directory should exist"
@@ -44,16 +44,16 @@ class TestInfrastructureSetup:
     def test_packages_importable(self):
         """Test that the main packages can be imported."""
         try:
-            import damai
-            assert damai is not None
+            import web
+            assert web is not None
         except ImportError as e:
-            pytest.fail(f"Failed to import damai package: {e}")
-        
+            pytest.fail(f"Failed to import web package: {e}")
+
         try:
-            import damai_appium
-            assert damai_appium is not None
+            import mobile
+            assert mobile is not None
         except ImportError as e:
-            pytest.fail(f"Failed to import damai_appium package: {e}")
+            pytest.fail(f"Failed to import mobile package: {e}")
     
     @pytest.mark.unit
     def test_unit_marker_works(self):
@@ -148,8 +148,8 @@ class TestCoverageConfiguration:
         content = pyproject_path.read_text()
         
         # Check coverage settings
-        assert "--cov=damai" in content
-        assert "--cov=damai_appium" in content
+        assert "--cov=web" in content
+        assert "--cov=mobile" in content
         assert "--cov-fail-under=80" in content
         assert "htmlcov" in content
         assert "coverage.xml" in content

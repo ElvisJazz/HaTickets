@@ -22,3 +22,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Test / Coverage
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/

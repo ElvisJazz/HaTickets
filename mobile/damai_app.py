@@ -15,7 +15,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-from config import Config
+try:
+    from mobile.config import Config
+except ImportError:
+    from config import Config
 
 
 class DamaiBot:
@@ -246,7 +249,9 @@ class DamaiBot:
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
                 (By.XPATH, '//*[contains(@text,"提交")]')
             ]
-            self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+            submit_success = self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+            if not submit_success:
+                print("⚠ 提交订单按钮未找到，请手动确认订单状态")
 
             end_time = time.time()
             print(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
@@ -257,7 +262,6 @@ class DamaiBot:
             return False
         finally:
             time.sleep(1)  # 给最后的操作一点时间
-            self.driver.quit()
 
     def run_with_retry(self, max_retries=3):
         """带重试机制的抢票"""
@@ -274,7 +278,7 @@ class DamaiBot:
                     # 重新初始化驱动
                     try:
                         self.driver.quit()
-                    except:
+                    except Exception:
                         pass
                     self._setup_driver()
 
@@ -285,4 +289,10 @@ class DamaiBot:
 # 使用示例
 if __name__ == "__main__":
     bot = DamaiBot()
-    bot.run_with_retry(max_retries=3)
+    try:
+        bot.run_with_retry(max_retries=3)
+    finally:
+        try:
+            bot.driver.quit()
+        except Exception:
+            pass

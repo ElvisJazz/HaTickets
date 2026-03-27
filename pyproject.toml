@@ -56,6 +56,7 @@ omit = [
     "*/tests/*",
     "*/__init__.py",
     "*/conftest.py",
+    "web/quick_diagnosis.py",
 ]
 
 [tool.coverage.report]

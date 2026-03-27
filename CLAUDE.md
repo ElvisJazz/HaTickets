@@ -13,6 +13,13 @@ Web and Mobile follow the same flow: config → driver init → navigation → t
 
 Performance is critical — this is competitive ticket-grabbing where milliseconds matter.
 
+## Prerequisites
+
+- **Python**: ^3.8 + Poetry
+- **Web**: Chrome browser (ChromeDriver auto-installed by `web/check_environment.py`)
+- **Mobile**: Android device/emulator + Appium 3.1+ + Node.js 20.19+
+- **Desktop**: Node.js 20+ + Rust toolchain + Yarn
+
 ## Commands
 
 ```bash
@@ -44,21 +51,23 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust tests
 - `damai.py` — Entry point: validates config, loads `Config`, orchestrates `Concert`
 - `concert.py` — Core automation: Selenium WebDriver lifecycle, cookie-based auth, ticket selection polling loop, order submission. Uses `self.status` state machine (0=init, 2=logged in, 3=selecting)
 - `config.py` — Config container (URL, users, city, dates, prices, retry count, fast_mode, page_load_delay)
+- `check_environment.py` — ChromeDriver auto-detection/installation; called automatically by `Concert.__init__`
 
 ### Mobile (`mobile/`)
 - `damai_app.py` — `DamaiBot` with coordinate-based gesture clicks (faster than element.click()), aggressive timeout tuning, batch coordinate collection
 - `config.py` — Mobile config via `load_config()` reading `config.jsonc`
 
 ### Desktop (`desktop/`)
-- **Frontend** (`desktop/src/`): Vue 3 + Vuex + Vue Router + Arco Design UI
+- **Frontend** (`desktop/src/`): Vue 3 + Vuex + Vue Router + Arco Design UI, bundled by Vite
   - Views: `dm.vue` (ticket operations)
   - Components: `dm/` (Form, Product, VisitUser), `common/` (Header, Proxy, Qa, Tip, Update)
-  - `utils/` — JS utilities: MD5 signing, baxia anti-spider, order param building, logging
+  - Store: Vuex with `state.js`, `mutations.js`, `mutation-types.js`
+  - `utils/dm/index.js` (18KB) — heaviest utility file: API calls, signing, anti-spider, order param building
   - `sql/` — SQLite schema/queries (via `tauri-plugin-sql`)
-- **Backend** (`desktop/src-tauri/src/`): Rust + reqwest calling Damai's mtop API
+- **Backend** (`desktop/src-tauri/src/`): Rust + reqwest (Tauri 1.3) calling Damai's mtop API
   - `main.rs` — Tauri commands: `get_product_info`, `get_ticket_list`, `get_ticket_detail`, `create_order`, `get_user_list`, `export_sql_to_txt`
   - `proxy_builder.rs` — HTTP/SOCKS proxy support for all API requests
-  - `utils.rs` — SQLite export utility
+  - `utils.rs` — SQLite export utility; `version.rs` — version management
   - All API requests use 3s timeout, spoofed mobile Chrome UA, and anti-crawl headers
 
 ### Configuration
@@ -68,8 +77,15 @@ cargo test --manifest-path src-tauri/Cargo.toml   # Rust tests
 
 ### Tests (`tests/`)
 - `conftest.py` — Shared fixtures: `mock_config`, `mock_selenium_driver`, `mock_appium_driver`, `sample_html_response`, `mock_time`, `temp_dir`
+- `test_setup_validation.py` — Environment and setup validation tests
+- `unit/` and `integration/` — Initialized but currently empty; new tests go here
 - Custom markers auto-applied by file location (unit/integration)
-- Coverage threshold: 80% (enforced in pyproject.toml)
+- Coverage threshold: 80% (enforced in pyproject.toml, covers `web/` and `mobile/` only)
+
+### Documentation (`docs/`)
+- Per-module logic docs: `web-ticket-logic.md`, `mobile-ticket-logic.md`, `desktop-ticket-logic.md`
+- `desktop-usage-guide.md` — Detailed Tauri usage guide
+- `大麦抢票流程.drawio` — Visual flow diagram
 
 ### CI/CD
 - `.github/workflows/release.yml` — Tag-triggered (`v*`) cross-platform Tauri build (macOS/Linux/Windows) with GitHub Release upload
