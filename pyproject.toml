@@ -5,8 +5,8 @@ description = "Automated ticket purchasing system for Damai.com"
 authors = ["Your Name <your.email@example.com>"]
 readme = "README.md"
 packages = [
-    { include = "damai" },
-    { include = "damai_appium" }
+    { include = "web" },
+    { include = "mobile" }
 ]
 
 [tool.poetry.dependencies]
@@ -36,8 +36,8 @@ addopts = [
     "-ra",
     "--strict-markers",
     "--strict-config",
-    "--cov=damai",
-    "--cov=damai_appium",
+    "--cov=web",
+    "--cov=mobile",
     "--cov-branch",
     "--cov-report=term-missing:skip-covered",
     "--cov-report=html:htmlcov",
@@ -51,7 +51,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["damai", "damai_appium"]
+source = ["web", "mobile"]
 omit = [
     "*/tests/*",
     "*/__init__.py",
