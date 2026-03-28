@@ -13,12 +13,8 @@ export const DM_APP_KEY = "12574478";
 export const DM_TOKEN_COOKIE_KEY = "_m_h5_tk";
 
 // ---- Baxia SDK 相关 ----
-// baxia 带版本号的 CDN 地址，阿里偶尔静默升级
+// baxia 入口地址（与大麦线上一致，只加载这一个脚本）
 // 若凭证脚本加载失败，检查此 URL 是否仍可访问
-export const BAXIA_VERSIONED_URL =
-    "https://g.alicdn.com/??/sd/baxia/2.5.0/baxiaCommon.js";
-
-// baxia 无版本号入口地址（相对稳定，一般不需改）
 export const BAXIA_ENTRY_URL =
     "https://g.alicdn.com/??/AWSC/AWSC/awsc.js,/sd/baxia-entry/baxiaCommon.js";
 
@@ -68,8 +64,7 @@ export const MSG_TOKEN_EXPIRED = "令牌过期";
 
 // ---- Baxia 风控路径匹配 ----
 // baxia initBaxia() 中 checkApiPath 检查的 API 列表
-// 若订单接口名变更需同步更新此列表
+// 与大麦线上 H5 页面保持一致
 export const BAXIA_CHECK_API_PATHS = [
-    "mtop.trade.order.build.h5",
-    "mtop.trade.order.create.h5",
+    "mtop.damai.item.detail.getdetail",
 ];

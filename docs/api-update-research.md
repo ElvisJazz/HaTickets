@@ -129,21 +129,20 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 
 **修改位置：** `dm_config.rs:USER_AGENT` 和 `SEC_CH_UA`
 
-### 4.2 Baxia SDK 版本 — ⚠️ 待确认
+### 4.2 Baxia SDK — ✅ 已对齐线上
 
-当前硬编码 `2.5.0`，页面实际加载的入口脚本 URL 格式为：
-```
-//g.alicdn.com/??/AWSC/AWSC/awsc.js,/sd/baxia-entry/baxiaCommon.js
-```
+通过抓取大麦 H5 页面源码确认：
 
-需访问大麦 H5 页面确认最新 Baxia SDK 版本号。
+**线上实际行为：**
+- 只加载一个入口脚本：`//g.alicdn.com/??/AWSC/AWSC/awsc.js,/sd/baxia-entry/baxiaCommon.js`
+- **不加载**带版本号的 `baxia/2.5.0/baxiaCommon.js`
+- checkApiPath 只检查 `mtop.damai.item.detail.getdetail`（商品详情），不检查订单接口
+- init 包含 `paramsType: ["uab","umid","et"]`、`appendTo: "header"`、`showCallback`、`hideCallback`
 
-**修改位置：** `desktop/src/utils/dm/dm-config.js` 的 `BAXIA_VERSIONED_URL`
-
-### 4.3 Baxia checkApiPath — ✅ 已提取到配置
-
-原来硬编码在 `baxia.js` 的 API 路径列表已提取到 `dm-config.js` 的 `BAXIA_CHECK_API_PATHS` 常量。
-当前订单 API 名称（`mtop.trade.order.build.h5` / `mtop.trade.order.create.h5`）经调研确认未变更。
+**已完成的修改：**
+- 移除 `BAXIA_VERSIONED_URL`，`loadBaxiaScript()` 改为只加载一个脚本
+- `BAXIA_CHECK_API_PATHS` 更新为 `["mtop.damai.item.detail.getdetail"]`
+- `initBaxia()` 补全 `paramsType`/`appendTo`/`showCallback`/`hideCallback` 参数
 
 ### 4.4 订单端点 URL params — ⚠️ 低优先级
 
@@ -159,7 +158,7 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 | 症状 | 检查文件 | 修改字段 |
 |------|----------|----------|
 | 签名验证失败 | `dm-config.js` | `DM_APP_KEY` |
-| 凭证脚本加载失败 | `dm-config.js` | `BAXIA_VERSIONED_URL` |
+| 凭证脚本加载失败 | `dm-config.js` | `BAXIA_ENTRY_URL` |
 | 接口 404 / 版本错误 | `dm_config.rs` | `API_VERSION_*` 或 `JSV` |
 | User-Agent 被风控 | `dm_config.rs` | `USER_AGENT` / `SEC_CH_UA` |
 | 订单参数字段缺失 | `dm-config.js` | `ORDER_TAG_LIST` / `ORDER_HIERARCHY_LIST` |

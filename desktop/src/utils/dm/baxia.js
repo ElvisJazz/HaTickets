@@ -1,4 +1,4 @@
-import { BAXIA_VERSIONED_URL, BAXIA_ENTRY_URL, BAXIA_INIT_DELAY_MS, BAXIA_CHECK_API_PATHS } from "./dm-config.js";
+import { BAXIA_ENTRY_URL, BAXIA_INIT_DELAY_MS, BAXIA_CHECK_API_PATHS } from "./dm-config.js";
 
 // 加载必要的生成 ua token 脚本
 // Returns a Promise that resolves when both scripts load, or rejects on error/timeout
@@ -6,40 +6,25 @@ export function loadBaxiaScript() {
     const TIMEOUT_MS = 5000;
 
     return new Promise((resolve, reject) => {
-        let loaded = 0;
-        const totalScripts = 2;
         const timer = setTimeout(() => {
             reject(new Error("Baxia scripts load timeout after " + TIMEOUT_MS + "ms"));
         }, TIMEOUT_MS);
-
-        function onScriptLoad() {
-            loaded++;
-            if (loaded >= totalScripts) {
-                clearTimeout(timer);
-                resolve();
-            }
-        }
 
         function onScriptError(e) {
             clearTimeout(timer);
             reject(new Error("Failed to load Baxia script: " + (e.target && e.target.src)));
         }
 
-        const awscScript = document.createElement("script");
-        awscScript.type = "text/javascript";
-        awscScript.crossOrigin = "anonymous";
-        awscScript.src = BAXIA_ENTRY_URL;
-        awscScript.onload = onScriptLoad;
-        awscScript.onerror = onScriptError;
-        document.body.appendChild(awscScript);
-
-        const baxiaCommonScript = document.createElement("script");
-        baxiaCommonScript.type = "text/javascript";
-        baxiaCommonScript.crossOrigin = "anonymous";
-        baxiaCommonScript.src = BAXIA_VERSIONED_URL;
-        baxiaCommonScript.onload = onScriptLoad;
-        baxiaCommonScript.onerror = onScriptError;
-        document.body.appendChild(baxiaCommonScript);
+        const baxiaScript = document.createElement("script");
+        baxiaScript.type = "text/javascript";
+        baxiaScript.crossOrigin = "anonymous";
+        baxiaScript.src = BAXIA_ENTRY_URL;
+        baxiaScript.onload = function () {
+            clearTimeout(timer);
+            resolve();
+        };
+        baxiaScript.onerror = onScriptError;
+        document.body.appendChild(baxiaScript);
     });
 }
 
@@ -48,10 +33,18 @@ export function initBaxia() {
     if (window.baxiaCommon) {
         try {
             window.baxiaCommon.init({
+                paramsType: ["uab", "umid", "et"],
+                appendTo: "header",
                 checkApiPath: function (i) {
                     return BAXIA_CHECK_API_PATHS.some(function (path) {
                         return -1 < i.indexOf(path);
                     });
+                },
+                showCallback: function () {
+                    window.hasBaxiaIntercept = true;
+                },
+                hideCallback: function (a) {
+                    console.log("validate:" + a);
                 },
             });
         } catch (e) {
