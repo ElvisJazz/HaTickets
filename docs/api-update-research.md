@@ -156,7 +156,59 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 
 ---
 
-## 五、维护速查表
+## 五、订单 API 体系分析（新旧共存）
+
+### 5.1 背景
+
+大麦 H5 JS bundle 中发现两套订单 API，需确认我们使用的是否为正确的购票流程：
+
+| API 名称 | 版本 | 类型 |
+|----------|------|------|
+| `mtop.trade.order.build.h5` | v4.0 | 我们当前使用 |
+| `mtop.trade.order.create.h5` | v4.0 | 我们当前使用 |
+| `mtop.damai.wireless.trade.common.order.confirm` | v1.0 | 线上 JS 中发现 |
+| `mtop.damai.wireless.trade.common.order.create` | v1.0 | 线上 JS 中发现 |
+
+### 5.2 分析结论
+
+通过分析大麦 APK 反编译源码（f11st/damai_decompiled、thefuckingcode/damai）确认：
+
+**两套 API 是并行存在的不同业务线，不是新旧替换关系。**
+
+#### Ultron 体系（门票购买 — 我们使用的）
+- `mtop.trade.order.build.h5` v4.0 — 构建订单（传入 buyParam，返回订单表单）
+- `mtop.trade.order.create.h5` v4.0 — 提交订单（返回支付信息）
+- 源码位置：`cn.damai.ultron.net.api.UltronBuildOrder` / `UltronCreateOrder`
+- **所有演出门票购买的核心流程**
+
+#### Coupon 体系（优惠券/次卡 — 不需要集成）
+- `mtop.damai.wireless.trade.common.order.confirm` v1.0 — 优惠券订单确认
+- `mtop.damai.wireless.trade.common.order.create` v1.0 — 优惠券订单创建
+- 源码位置：`com.alibaba.pictures.bricks.orderconfirm.request.CouponOrderRenderRequest`
+- 参数极简（只有 itemId/skuId/buyAmount），无 buyParam/exParams/signKey
+- **用于剧本杀优惠券、次卡等周边商品，与门票购买无关**
+
+### 5.3 结论
+
+✅ **无需切换 API。** 我们当前使用的 `mtop.trade.order.build.h5` v4.0 + `mtop.trade.order.create.h5` v4.0 是正确的 H5 购票 API。
+
+---
+
+## 六、全部 API 验证状态汇总
+
+| # | 接口 | API 名称 | 版本 | 状态 | 说明 |
+|---|------|----------|------|------|------|
+| 1 | 商品详情 | `mtop.damai.item.detail.getdetail` | 1.0 | ✅ 已更新 | 从旧 `mtop.alibaba.damai.detail.getdetail` v1.2 迁移 |
+| 2 | 票档列表 | `mtop.alibaba.detail.subpage.getdetail` | 2.0 | ✅ 已更新 | URL params 统一，data body 不变 |
+| 3 | 确认订单 | `mtop.trade.order.build.h5` | 4.0 | ✅ 已验证 | Ultron 体系，URL params 已更新 |
+| 4 | 提交订单 | `mtop.trade.order.create.h5` | 4.0 | ✅ 已验证 | Ultron 体系，URL params 已更新 |
+| 5 | 观演人 | `mtop.damai.wireless.user.customerlist.get` | 2.0 | ✅ 已更新 | URL params 统一 |
+
+**所有 5 个 API 端点均已验证为最新。**
+
+---
+
+## 七、维护速查表
 
 大麦更新后快速排查指南：
 
@@ -174,7 +226,7 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 
 ---
 
-## 六、参考资源
+## 八、参考资源
 
 - [GitHub: ff522/dm-ticket (Rust, 1.6k forks)](https://github.com/ff522/dm-ticket) — 最活跃的 Tauri 抢票项目
 - [GitHub: ThinkerWen/TicketMonitoring (微信小程序端)](https://github.com/ThinkerWen/TicketMonitoring) — 新版 API 格式参考
@@ -184,3 +236,5 @@ Chrome/113 → Chrome/146（2026 年 3 月最新稳定版）：
 - [GitHub: damai-tickets 抢票脚本](https://github.com/Jxpro/damai-tickets)
 - [大麦回流票监控](https://www.404fix.cn/posts/damai-resale-ticket-monitor/)
 - [GitHub: oceanzhang01/damaiapi (MtopRequest)](https://github.com/oceanzhang01/damaiapi/blob/master/MtopRequest.java)
+- [GitHub: f11st/damai_decompiled (APK 反编译)](https://github.com/f11st/damai_decompiled) — Ultron/Coupon 订单体系分析
+- [GitHub: thefuckingcode/damai (抓包+Frida)](https://github.com/thefuckingcode/damai) — APP 端 API 抓包分析
