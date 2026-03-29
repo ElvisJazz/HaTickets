@@ -2,6 +2,12 @@
 
 这个仓库不是票务展示站，而是一个“大麦抢票自动化工具箱”。
 
+## 法律说明
+
+- 开源协议：见 [LICENSE](/Users/andrew/Documents/GitHub/HaTickets/LICENSE)
+- 版权与商标声明：见 [NOTICE](/Users/andrew/Documents/GitHub/HaTickets/NOTICE)
+- 免责申明：见 [DISCLAIMER.md](/Users/andrew/Documents/GitHub/HaTickets/DISCLAIMER.md)
+
 ## 当前状态
 
 - `Mobile`：当前主推方案，也是 README 主要说明对象
@@ -299,4 +305,4 @@ poetry run pytest
 
 ## 免责声明
 
-仅供学习和研究使用。请自行承担使用风险，并遵守平台规则。
+仅供学习和研究使用。请自行承担使用风险，并遵守平台规则。更完整的说明见 [DISCLAIMER.md](/Users/andrew/Documents/GitHub/HaTickets/DISCLAIMER.md)。
