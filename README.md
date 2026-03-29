@@ -1,147 +1,281 @@
-# HaTickets - 大麦网抢票自动化
+# HaTickets - 大麦抢票自动化
 
-三套方案、一个目标 —— 在大麦网开售的瞬间帮你抢到票。
+这个仓库不是票务展示站，而是一个“大麦抢票自动化工具箱”。
 
-## 三种抢票方案
+目前有 3 条路线：
 
-| 方案 | 目录 | 技术栈 | 原理 | 速度 |
-|------|------|--------|------|------|
-| **Web** | `web/` | Python + Selenium | 自动操控 Chrome 浏览器完成购票流程 | ★★☆ |
-| **Mobile** | `mobile/` | Python + Appium | 自动操控 Android 大麦 APP，坐标级手势点击 | ★★★ |
-| **Desktop** | `desktop/` | Rust + Vue 3 (Tauri) | 绕过浏览器/APP，直接调用大麦 mtop API | ★★★★ |
+| 方案 | 目录 | 适合谁 | 特点 |
+|------|------|--------|------|
+| `Mobile` | `mobile/` | 新手优先 | 走 Android 大麦 App，最接近真实购票流程 |
+| `Web` | `web/` | 会折腾浏览器自动化的人 | Selenium 控制 Chrome |
+| `Desktop` | `desktop/` | 研究接口的人 | 直接调 API，速度快，但更容易受渠道和风控影响 |
 
-> **Desktop 最快**：跳过 UI 渲染，直接发 HTTP 请求；**Mobile 最稳**：走官方 APP 流程，不易触发风控。
+> 如果你是第一次用，直接走 `Mobile + 安卓真机`。  
+> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。
 
-## 快速开始
+## 一图看懂
 
-### Web 端
+![移动端抢票流程](docs/images/tickets-process.png)
+
+上图对应的是当前项目的核心思路：  
+先到演出详情页或票档页，再进入确认页；如果配置了 `if_commit_order: false`，脚本会停在“立即提交”之前，不会帮你支付。
+
+## 小白推荐路线
+
+推荐你按这 3 个阶段走，不要一步到位：
+
+1. `探测模式`：确认手机、Appium、页面状态都正常
+2. `不支付验证`：自动走到“确认购买”页，但不点“立即提交”
+3. `正式提交`：确认前两步没问题后，再把自动提交打开
+
+对应配置：
+
+| 目标 | `probe_only` | `if_commit_order` |
+|------|--------------|-------------------|
+| 只看环境通不通 | `true` | `false` |
+| 到确认页但不提交 | `false` | `false` |
+| 自动提交订单 | `false` | `true` |
+
+## Mobile 真机教程
+
+这一节是最适合新手的用法。
+
+### 第 1 步：准备环境
+
+你至少需要这些东西：
+
+- 一台 Android 真机
+- 手机上已经安装大麦 App，并且已经登录
+- Mac 上有 `Python`、`Poetry`、`Node.js`、`Appium`
+- 手机已经打开 `开发者选项` 和 `USB 调试`
+
+安装 Python 依赖：
 
 ```bash
 poetry install
+```
+
+安装 Appium：
+
+```bash
+npm install -g appium
+appium driver install uiautomator2
+```
+
+如果你还没有 Android SDK，建议直接安装 Android Studio。
+
+### 第 2 步：连接手机
+
+1. 用数据线把安卓手机连到电脑
+2. 手机打开 `开发者选项`
+3. 打开 `USB 调试`
+4. 手机上如果弹“是否允许这台电脑调试”，点 `允许`
+
+然后执行：
+
+```bash
+adb devices
+```
+
+你应该能看到类似输出：
+
+```bash
+List of devices attached
+ABC1234567	device
+```
+
+这里的 `ABC1234567` 就是你的 `udid`。
+
+### 第 3 步：启动 Appium
+
+最省事的方式：
+
+```bash
+./mobile/scripts/start_appium.sh
+```
+
+如果你想自己启动，也可以：
+
+```bash
+appium --port 4723
+```
+
+### 第 4 步：修改配置
+
+编辑 [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc)。
+
+推荐你第一次先填成这种“安全模式”：
+
+```jsonc
+{
+  "server_url": "http://127.0.0.1:4723",
+  "device_name": "Android",
+  "udid": "你的 adb devices 序列号",
+  "platform_version": "14",
+  "app_package": "cn.damai",
+  "app_activity": ".launcher.splash.SplashMainActivity",
+  "keyword": "周深",
+  "users": ["你的真实观演人姓名"],
+  "city": "深圳",
+  "date": "12.06",
+  "price": "内场1199元",
+  "price_index": 5,
+  "if_commit_order": false,
+  "probe_only": true
+}
+```
+
+每个字段是什么意思：
+
+- `udid`：你的手机序列号，来自 `adb devices`
+- `users`：必须写你大麦账号里真实存在的观演人姓名
+- `city`：演出城市
+- `date`：场次日期文本，按页面上看到的写
+- `price`：票档文本，尽量按页面原文填
+- `price_index`：如果文本匹配失败，就按索引兜底
+- `if_commit_order`：是否自动点“立即提交”
+- `probe_only`：是否只做页面探测
+
+下面这张图能帮你理解 `city / date / price` 这些值通常从哪里看：
+
+![参数示意图](docs/images/example_detail.png)
+
+### 第 5 步：先做探测，不提交
+
+先在手机上手动做两件事：
+
+1. 打开大麦 App
+2. 进入目标演出详情页，或者已经点进票档页
+
+然后执行：
+
+```bash
+./mobile/scripts/start_ticket_grabbing.sh
+```
+
+如果这一步成功，说明：
+
+- 手机已连接
+- Appium 已启动
+- 大麦 App 能被正常控制
+- 当前页面可以被脚本识别
+
+### 第 6 步：做“不支付验证”
+
+把 [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc) 改成：
+
+```jsonc
+"probe_only": false,
+"if_commit_order": false
+```
+
+然后再次运行：
+
+```bash
+./mobile/scripts/start_ticket_grabbing.sh
+```
+
+这一步的预期结果是：
+
+- 脚本自动选票
+- 自动进入“确认购买”页
+- 停在“立即提交”之前
+- 不会支付
+
+### 第 7 步：确认没问题后再正式提交
+
+只有当你已经完成上一步，并确认流程没问题时，才把：
+
+```jsonc
+"if_commit_order": true
+```
+
+打开自动提交。
+
+## 常见问题
+
+### 1. `adb: command not found`
+
+说明 Android SDK 的 `platform-tools` 没进环境变量。  
+最直接的办法是：
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+```
+
+### 2. `adb devices` 看不到手机
+
+先检查：
+
+1. 手机有没有打开 `USB 调试`
+2. 数据线是不是只能充电不能传数据
+3. 手机上有没有点“允许调试”
+
+### 3. 打开大麦后提示“访问被拒绝”
+
+这通常是风控，不一定是代码问题。  
+模拟器比真机更容易触发，所以推荐用真机。
+
+### 4. 脚本找不到观演人
+
+最常见原因是：
+
+- [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc) 里的 `users` 写的是占位符，不是真实名字
+- 你的大麦账号里还没有配置对应观演人
+
+### 5. 脚本没有进入确认页
+
+通常先查这几项：
+
+1. `price` 文本是不是填错了
+2. `price_index` 是不是和实际票档不一致
+3. 当前票档是不是“缺货登记”而不是可买状态
+4. 当前项目是不是只支持 App，不支持 H5 / Web
+
+## 其他方案
+
+### Web 端
+
+适合已经熟悉 Selenium 的人。
+
+```bash
 cd web
-# 编辑 config.json 填入演出 URL、观演人等
 python damai.py
 ```
 
-首次运行会打开 Chrome 让你扫码登录，Cookie 会自动保存。
-
-### Mobile 端
-
-```bash
-# 1. 启动 Appium
-appium --port 4723
-
-# 2. 编辑配置
-vim mobile/config.jsonc
-
-# 3. 在 Android 设备上打开大麦 APP，进入目标演出页面，然后运行：
-cd mobile && poetry run python damai_app.py
-```
-
-需要：Android 真机或模拟器 + Appium 3.1+ + Node.js 20.19+
+首次运行会打开 Chrome 登录，配置文件是 [web/config.json](/Users/andrew/Documents/GitHub/HaTickets/web/config.json)。
 
 ### Desktop 端
+
+速度最快，但不推荐新手先从这里开始，因为很多项目会有渠道限制和风控差异。
 
 ```bash
 cd desktop
 yarn install
-yarn tauri dev      # 开发模式
-yarn tauri build    # 生产构建
+yarn tauri dev
 ```
-
-需要：Node.js 20+ + Rust toolchain
 
 ## 项目结构
 
-```
+```text
 HaTickets/
-├── web/                  # Web 端 (Selenium + ChromeDriver)
-│   ├── damai.py         #   入口：加载配置 → 启动 Concert
-│   ├── concert.py       #   核心：登录、轮询、选票、下单
-│   └── config.json      #   配置：演出 URL、票价、观演人
-├── mobile/               # 移动端 (Appium + UIAutomator2)
-│   ├── damai_app.py     #   DamaiBot：坐标手势 + 批量点击
-│   └── config.jsonc     #   配置：关键词、城市、日期、票价
-├── desktop/              # 桌面端 (Tauri v1)
-│   ├── src/             #   Vue 3 前端 (Arco Design)
-│   ├── src-tauri/src/   #   Rust 后端：直调 mtop API
-│   │   ├── main.rs      #     5 个 Tauri command
-│   │   └── proxy_builder.rs  # HTTP/SOCKS 代理
-│   └── src/utils/dm/    #   签名、反爬、下单参数构造
-├── tests/                # Python 测试 (pytest, 80% 覆盖率)
-├── docs/                 # 技术文档与流程图
-└── pyproject.toml        # Python 依赖与测试配置
+├── mobile/                  # Android App 自动化
+├── web/                     # Selenium 浏览器自动化
+├── desktop/                 # Tauri + Rust 桌面端
+├── docs/                    # 文档、流程图、说明图
+├── tests/                   # pytest 测试
+└── pyproject.toml           # Python 依赖
 ```
 
-## 配置示例
-
-<details>
-<summary><b>Web 端 — web/config.json</b></summary>
-
-```json
-{
-  "target_url": "https://detail.damai.cn/item.htm?id=xxx",
-  "users": ["张三", "李四"],
-  "city": "广州",
-  "dates": ["2025-10-28"],
-  "prices": ["1039"],
-  "if_commit_order": true,
-  "max_retries": 10000,
-  "fast_mode": true
-}
-```
-
-</details>
-
-<details>
-<summary><b>Mobile 端 — mobile/config.jsonc</b></summary>
-
-```json
-{
-  "server_url": "http://127.0.0.1:4723",
-  "device_name": "Android",
-  "udid": "emulator-5554",
-  "platform_version": "15",
-  "app_package": "cn.damai",
-  "app_activity": ".launcher.splash.SplashMainActivity",
-  "keyword": "刘若英",
-  "users": ["张三", "李四"],
-  "city": "泉州",
-  "date": "10.04",
-  "price": "799元",
-  "price_index": 1,
-  "if_commit_order": true,
-  "probe_only": false
-}
-```
-
-</details>
-
-首次使用建议把 `probe_only` 设为 `true`，先只验证当前页面是不是目标演出详情页、关键控件是否就绪。当前 `mobile` MVP 仍要求用户先手动打开目标演出详情页，不依赖稳定的 App 内搜索或 deeplink 导航。
-
-真机接入时，先运行 `adb devices`，把手机序列号填到 `udid`。如果只连一台设备，`device_name` 用默认 `Android` 即可。
-
-## 关键设计
-
-- **Mobile 坐标点击**：用 `ultra_fast_click()` 替代 `element.click()`，省去元素查找开销
-- **Desktop 直调 API**：Rust 发起 HTTP 请求到 `mtop.damai.cn`，3s 超时，伪装移动端 UA + 反爬 Header
-- **Desktop 代理支持**：`ProxyBuilder` 支持 HTTP/SOCKS5 代理，所有 API 请求可走代理
-- **Web Cookie 持久化**：登录后 Cookie 序列化到本地，下次跳过登录
-- **Web 快速模式**：`fast_mode: true` 将轮询间隔压到最低
-
-## 开发
+## 开发与测试
 
 ```bash
-# Python 测试
 poetry install
-poetry run pytest                    # 全部测试
-poetry run pytest -k "test_name"     # 单个测试
-poetry run pytest -m unit            # 按标签
-
-# Desktop 开发
-cd desktop && yarn tauri dev
+poetry run pytest
 ```
 
-## License
+## 免责声明
 
-仅供学习和研究使用。
+仅供学习和研究使用。请自行承担使用风险，并遵守平台规则。
