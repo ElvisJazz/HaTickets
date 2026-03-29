@@ -20,6 +20,11 @@
 ## 配置项 (`config.jsonc`)
 
 - `server_url`: Appium 服务器地址
+- `device_name`: Appium 设备名，模拟器/真机通用
+- `udid`: 设备序列号；真机建议填写 `adb devices` 的序列号
+- `platform_version`: 可选，设备 Android 版本
+- `app_package`: 大麦 App 包名
+- `app_activity`: 大麦启动 Activity
 - `keyword`: 搜索关键词
 - `users`: 观演人姓名列表
 - `city`: 目标城市
@@ -28,6 +33,10 @@
 - `price_index`: 票价在列表中的索引位置
 - `if_commit_order`: 是否自动提交订单
 - `probe_only`: 仅做详情页探测，不执行购票点击
+- `sell_start_time`: 开售时间（ISO 格式字符串），null 表示立即购买
+- `countdown_lead_ms`: 提前轮询时间（毫秒），默认 3000
+- `fast_retry_count`: 快速重试次数（不重建 driver），默认 5
+- `fast_retry_interval_ms`: 快速重试间隔（毫秒），默认 500
 
 ## 主流程
 
@@ -38,17 +47,21 @@ DamaiBot.__init__()
 
 run_with_retry(max_retries=3)
   └── run_ticket_grabbing()   # 单次抢票流程
-        ├── dismiss_startup_popups()   # 处理首启弹窗
-        ├── probe_current_page()       # 探测当前页面状态
+        ├── dismiss_startup_popups()       # 处理首启弹窗
+        ├── check_session_valid()          # 登录状态检测
+        ├── probe_current_page()           # 探测当前页面状态
         │   ├── 非 detail_page => 直接失败
         │   └── probe_only => 验证控件后提前结束
+        ├── wait_for_sale_start()          # 倒计时等待（可选）
+        ├── 0. 选择场次日期
         ├── 1. 选择城市
         ├── 2. 点击预约按钮
-        ├── 3. 选择票价
+        ├── 3. 选择票价（文本匹配 → 索引回退）
         ├── 4. 选择数量
         ├── 5. 确定购买
         ├── 6. 选择用户
-        └── 7. 提交订单
+        ├── 7. 提交订单
+        └── 8. 验证订单结果
 ```
 
 ## 详细流程
@@ -58,7 +71,9 @@ run_with_retry(max_retries=3)
 **Appium Capabilities**:
 ```python
 platformName: "Android"
-deviceName: "emulator-5554"
+deviceName: config.device_name
+udid: config.udid            # 可选，真机推荐填写
+platformVersion: config.platform_version   # 可选
 automationName: "UiAutomator2"
 noReset: True           # 保持 APP 登录态
 disableWindowAnimation: True  # 禁用动画提速
@@ -66,6 +81,8 @@ disableWindowAnimation: True  # 禁用动画提速
 
 说明：
 - 当前实现不再硬编码 `platformVersion`
+- `deviceName`、`udid`、`appPackage`、`appActivity` 都从配置文件读取
+- 因此同一套代码可以切换安卓模拟器和安卓真机
 - 这样可以避免 Appium 因设备实际 Android 版本和代码常量不一致而拒绝创建会话
 
 **激进性能优化**:
@@ -143,11 +160,12 @@ driver.execute_script("mobile: clickGesture", {
 2. 正则匹配文本 (`.*预约.*|.*购买.*|.*立即.*`)
 3. XPath 文本包含
 
-**票价选择**: 这是一个特殊处理
-- 大麦 APP 的票价元素 **text 是空的**（被隐藏了）
-- 只能通过 `FrameLayout` 的 **index** 和 `clickable=true` 来定位
-- 配置中的 `price_index` 就是为此设计的
-- 先尝试 `find_element` 直接查找（不等待），失败后走 `WebDriverWait`
+**票价选择**: 两级策略
+1. 先尝试 `UiSelector().textContains(config.price)` 文本匹配（1 秒超时）
+2. 文本匹配失败时，回退到 `FrameLayout` 的 **index** + `clickable=true` 定位
+   - 大麦 APP 的票价元素有时 **text 是空的**（被隐藏了），此时只能用索引
+   - 配置中的 `price_index` 就是为此设计的
+   - 先尝试 `find_element` 直接查找（不等待），失败后走 `WebDriverWait`
 
 **数量选择**:
 - 查找 `+` 按钮（`img_jia`）
@@ -167,9 +185,52 @@ driver.execute_script("mobile: clickGesture", {
 
 `run_with_retry(max_retries=3)`:
 - 最多尝试 3 次
-- 失败后等待 2 秒
-- 重新初始化 driver（`driver.quit()` + `_setup_driver()`）
+- 每次失败后先执行 `fast_retry_count` 次快速重试（不重建 driver）
+- 快速重试间隔由 `fast_retry_interval_ms` 控制（默认 500ms）
+- 快速重试根据当前页面状态决定策略：detail/sku 页重跑全流程，order_confirm 页直接提交，其他页按返回键后重跑
+- 全部快速重试失败后，才重建 driver（`driver.quit()` + `_setup_driver()`）
 - 全部失败则退出
+
+### 6. 倒计时/预售等待
+
+`wait_for_sale_start()`:
+- 当 `sell_start_time` 配置不为 null 时，在开售前 `countdown_lead_ms` 毫秒进入休眠等待
+- 休眠结束后进入 ~200ms 间隔的紧密轮询循环，检测"立即购买"等可购买按钮出现
+- 超时 5 秒后自动继续执行，避免死锁
+- `sell_start_time` 为 null 时立即购买，不等待
+
+### 7. 订单结果验证
+
+`verify_order_result(timeout=5)`:
+- 提交订单后轮询检测结果（300ms 间隔）
+- 通过 Activity 名称判断支付页面（Pay、Cashier、AlipayClient）
+- 通过页面文本检测：支付成功、已售罄、库存不足、验证码、未支付订单等
+- 返回值：`success` / `sold_out` / `captcha` / `existing_order` / `timeout`
+
+### 8. 登录状态检测
+
+`check_session_valid()`:
+- 在抢票流程开始前检查登录状态
+- 检测当前 Activity 是否为登录页（LoginActivity、SignActivity）
+- 检测页面是否存在"请先登录"或"登录/注册"文本提示
+- 登录失效时立即返回 False，避免无效执行
+
+### 9. 演出日期选择
+
+`select_performance_date()`:
+- 在城市选择之前执行，通过 `UiSelector().textContains()` 匹配 `config.date`
+- 匹配成功则点击对应日期，失败则使用默认场次
+- 超时仅 1 秒，不阻塞主流程
+
+### 10. 改进的票价选择
+
+票价选择采用两级策略：
+1. **文本匹配优先**：通过 `UiSelector().textContains(config.price)` 直接匹配票价文本
+2. **索引回退**：文本匹配失败时，回退到原有的 `FrameLayout` index + `clickable=true` 定位方式
+   - 先尝试 `find_element` 直接查找（不等待）
+   - 失败后走 `WebDriverWait` 等待容器出现再查找
+
+这种两级策略兼容了票价文本可见和不可见两种情况。
 
 ## 前置条件
 
@@ -193,7 +254,13 @@ driver.execute_script("mobile: clickGesture", {
 - **仅 Android**: capabilities 硬编码 Android + UiAutomator2
 - **不支持 iOS**: 需要 XCUITest 引擎 + 完全不同的元素定位方式
 - **不支持选座**: 流程中没有选座步骤
-- 设备名硬编码为 `emulator-5554`（Android 模拟器默认端口）
+
+## 真机配置建议
+
+1. 用 `adb devices` 确认真机已经连上
+2. 把设备序列号填进 `config.jsonc` 的 `udid`
+3. `device_name` 可以保持 `Android`，也可以写成你自己的机型名
+4. 如果大麦版本或 ROM 定制导致启动页不同，再覆盖 `app_activity`
 
 ## 性能设计理念
 
