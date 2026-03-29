@@ -72,21 +72,21 @@
 
 ```bash
 poetry install
-cd damai && python damai.py
+cd web && python damai.py
 ```
 
 ### Mobile 端（推荐）
 
 ```bash
 poetry install
-./start_appium.sh        # 启动 Appium 服务器
-./start_ticket_grabbing.sh  # 执行抢票
+./mobile/scripts/start_appium.sh
+./mobile/scripts/start_ticket_grabbing.sh
 ```
 
 ### 桌面端（仅历史参考）
 
 ```bash
-cd tickets-master
+cd desktop
 yarn install
 yarn tauri dev    # 开发模式
 yarn tauri build  # 构建发布包

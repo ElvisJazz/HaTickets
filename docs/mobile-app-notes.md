@@ -1,18 +1,28 @@
-# 安卓端V2版本介绍
+# 安卓端 V2 版本介绍
+
+> 这份文档主要保留移动端实现思路。  
+> 当前实际使用时，请优先参考根目录 [README.md](/Users/andrew/Documents/GitHub/HaTickets/README.md) 和 [quick-start.md](/Users/andrew/Documents/GitHub/HaTickets/docs/quick-start.md)。
+
 ## 执行命令
-### 开启appium服务端
+
+### 开启 Appium 服务端
+
 ```bash
 appium --address 0.0.0.0 --port 4723 --relaxed-security
 ```
+
 如果确定某些按钮点击后不会马上有新页面加载，可以加 `--relaxed-security` 启动 Appium，然后用 `mobile: clickGesture` 直接原生点击：
+
 ```python
 # 这里的target是一个可以执行click()的对象
 driver.execute_script('mobile: clickGesture', {'elementId': target.id})
 ```
+
 ### 执行抢票任务
+
 ```bash
-cd damai_appium
-python damai_app_v2.py
+cd mobile
+poetry run python damai_app.py
 ```
 
 
