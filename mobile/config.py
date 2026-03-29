@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import os
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -27,7 +28,9 @@ def _strip_jsonc_comments(text):
 class Config:
     def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
                  probe_only=False, device_name="Android", udid=None, platform_version=None,
-                 app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity"):
+                 app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity",
+                 sell_start_time=None, countdown_lead_ms=3000,
+                 fast_retry_count=5, fast_retry_interval_ms=500):
         # Validate server_url
         validate_url(server_url, "server_url")
 
@@ -63,6 +66,27 @@ class Config:
         if not isinstance(app_activity, str) or len(app_activity.strip()) == 0:
             raise ValueError(f"app_activity 必须是非空字符串，实际值: {app_activity!r}")
 
+        # Validate sell_start_time
+        if sell_start_time is not None:
+            if not isinstance(sell_start_time, str):
+                raise ValueError(f"sell_start_time 必须是 ISO 格式的时间字符串或 null，实际值: {sell_start_time!r}")
+            try:
+                datetime.fromisoformat(sell_start_time)
+            except (ValueError, TypeError):
+                raise ValueError(f"sell_start_time 无法解析为 ISO 时间格式，实际值: {sell_start_time!r}")
+
+        # Validate countdown_lead_ms
+        if not isinstance(countdown_lead_ms, int) or isinstance(countdown_lead_ms, bool) or countdown_lead_ms < 0:
+            raise ValueError(f"countdown_lead_ms 必须是非负整数，实际值: {countdown_lead_ms!r}")
+
+        # Validate fast_retry_count
+        if not isinstance(fast_retry_count, int) or isinstance(fast_retry_count, bool) or fast_retry_count < 0:
+            raise ValueError(f"fast_retry_count 必须是非负整数，实际值: {fast_retry_count!r}")
+
+        # Validate fast_retry_interval_ms
+        if not isinstance(fast_retry_interval_ms, int) or isinstance(fast_retry_interval_ms, bool) or fast_retry_interval_ms < 0:
+            raise ValueError(f"fast_retry_interval_ms 必须是非负整数，实际值: {fast_retry_interval_ms!r}")
+
         self.server_url = server_url
         self.keyword = keyword
         self.users = users
@@ -77,6 +101,10 @@ class Config:
         self.platform_version = platform_version
         self.app_package = app_package
         self.app_activity = app_activity
+        self.sell_start_time = sell_start_time
+        self.countdown_lead_ms = countdown_lead_ms
+        self.fast_retry_count = fast_retry_count
+        self.fast_retry_interval_ms = fast_retry_interval_ms
 
     @staticmethod
     def load_config():
@@ -109,4 +137,8 @@ class Config:
                       config.get('udid'),
                       config.get('platform_version'),
                       config.get('app_package', 'cn.damai'),
-                      config.get('app_activity', '.launcher.splash.SplashMainActivity'))
+                      config.get('app_activity', '.launcher.splash.SplashMainActivity'),
+                      config.get('sell_start_time'),
+                      config.get('countdown_lead_ms', 3000),
+                      config.get('fast_retry_count', 5),
+                      config.get('fast_retry_interval_ms', 500))

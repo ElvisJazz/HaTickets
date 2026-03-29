@@ -161,6 +161,45 @@ class TestMobileConfigValidation:
             Config(**_make(app_activity=""))
 
 
+class TestMobileConfigNewFields:
+
+    def test_sell_start_time_valid_iso(self):
+        cfg = Config(**_make(sell_start_time="2026-04-01T20:00:00+08:00"))
+        assert cfg.sell_start_time == "2026-04-01T20:00:00+08:00"
+
+    def test_sell_start_time_invalid_raises(self):
+        with pytest.raises(ValueError, match="sell_start_time"):
+            Config(**_make(sell_start_time="not-a-date"))
+
+    def test_sell_start_time_none_is_valid(self):
+        cfg = Config(**_make(sell_start_time=None))
+        assert cfg.sell_start_time is None
+
+    def test_countdown_lead_ms_default(self):
+        cfg = Config(**_make())
+        assert cfg.countdown_lead_ms == 3000
+
+    def test_countdown_lead_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="countdown_lead_ms"):
+            Config(**_make(countdown_lead_ms=-1))
+
+    def test_fast_retry_count_default(self):
+        cfg = Config(**_make())
+        assert cfg.fast_retry_count == 5
+
+    def test_fast_retry_count_negative_raises(self):
+        with pytest.raises(ValueError, match="fast_retry_count"):
+            Config(**_make(fast_retry_count=-1))
+
+    def test_fast_retry_interval_ms_negative_raises(self):
+        with pytest.raises(ValueError, match="fast_retry_interval_ms"):
+            Config(**_make(fast_retry_interval_ms=-1))
+
+    def test_fast_retry_interval_ms_default(self):
+        cfg = Config(**_make())
+        assert cfg.fast_retry_interval_ms == 500
+
+
 class TestMobileConfigLoadConfig:
 
     def test_load_config_success(self, mock_mobile_config_file, monkeypatch):

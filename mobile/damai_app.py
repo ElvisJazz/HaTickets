@@ -7,6 +7,8 @@ __Created__ = 2025/09/13 19:27
 """
 
 import time
+from datetime import datetime, timezone, timedelta
+
 from appium import webdriver
 from appium.options.common.base import AppiumOptions
 from appium.webdriver.common.appiumby import AppiumBy
@@ -193,6 +195,98 @@ class DamaiBot:
         except Exception:
             return ""
 
+    def wait_for_sale_start(self):
+        """等待开售时间，在开售前 countdown_lead_ms 毫秒开始轮询。"""
+        if self.config.sell_start_time is None:
+            return
+
+        _tz_shanghai = timezone(timedelta(hours=8))
+        sell_time = datetime.fromisoformat(self.config.sell_start_time)
+        # Ensure timezone-aware
+        if sell_time.tzinfo is None:
+            sell_time = sell_time.replace(tzinfo=_tz_shanghai)
+
+        now = datetime.now(tz=_tz_shanghai)
+        if now >= sell_time:
+            logger.info("开售时间已过，跳过等待")
+            return
+
+        lead_delta = timedelta(milliseconds=self.config.countdown_lead_ms)
+        poll_start = sell_time - lead_delta
+        sleep_seconds = (poll_start - now).total_seconds()
+
+        if sleep_seconds > 0:
+            logger.info(
+                f"等待开售，将在 {self.config.sell_start_time} 前 "
+                f"{self.config.countdown_lead_ms}ms 开始轮询"
+            )
+            time.sleep(sleep_seconds)
+
+        # Tight polling loop (~200ms) until button becomes actionable or timeout
+        deadline = sell_time + timedelta(seconds=5)
+        while datetime.now(tz=_tz_shanghai) < deadline:
+            if self._has_element(
+                AppiumBy.ANDROID_UIAUTOMATOR,
+                'new UiSelector().textMatches(".*立即.*|.*购买.*|.*选座.*")'
+            ):
+                logger.info("检测到可购买按钮，开售已开始")
+                return
+            time.sleep(0.2)
+
+        logger.warning("等待开售超时，继续执行")
+
+    def verify_order_result(self, timeout=5):
+        """验证订单提交结果"""
+        start = time.time()
+        while time.time() - start < timeout:
+            activity = self._get_current_activity()
+
+            # Success: payment page
+            if any(kw in activity for kw in ("Pay", "Cashier", "AlipayClient")):
+                logger.info("订单提交成功，已跳转支付页面")
+                return "success"
+
+            # Check page text for various outcomes
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("支付")'):
+                logger.info("订单提交成功，检测到支付页面")
+                return "success"
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已售罄")') or \
+               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("库存不足")') or \
+               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("暂时无票")'):
+                logger.warning("票已售罄")
+                return "sold_out"
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("滑块")') or \
+               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("验证")'):
+                logger.warning("触发验证码")
+                return "captcha"
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'):
+                logger.warning("已有未支付订单")
+                return "existing_order"
+
+            time.sleep(0.3)
+
+        logger.warning("订单验证超时")
+        return "timeout"
+
+    def _fast_retry_from_current_state(self):
+        """根据当前页面状态进行快速重试。"""
+        page_probe = self.probe_current_page()
+        state = page_probe["state"]
+
+        if state in ("detail_page", "sku_page"):
+            return self.run_ticket_grabbing()
+        elif state == "order_confirm_page":
+            submit_selectors = [
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+                (By.XPATH, '//*[contains(@text,"提交")]')
+            ]
+            return self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
+        else:
+            self.driver.press_keycode(4)  # Android Back
+            time.sleep(0.5)
+            return self.run_ticket_grabbing()
+
     def dismiss_startup_popups(self):
         """处理首启的一次性系统/应用弹窗。"""
         dismissed = False
@@ -282,6 +376,9 @@ class DamaiBot:
 
                 logger.warning("probe_only 模式: 详情页关键控件未就绪")
                 return False
+
+            # Wait for sale start if configured
+            self.wait_for_sale_start()
 
             if page_probe["state"] == "detail_page":
                 # 1. 城市选择 - 准备多个备选方案
@@ -396,6 +493,15 @@ class DamaiBot:
             if not submit_success:
                 logger.warning("提交订单按钮未找到，请手动确认订单状态")
 
+            # 8. 验证订单结果
+            result = self.verify_order_result()
+            if result == "success":
+                end_time = time.time()
+                logger.info(f"抢票成功！耗时: {end_time - start_time:.2f}秒")
+                return True
+            elif result in ("sold_out", "captcha", "existing_order"):
+                return False
+            # timeout/unknown — optimistically return True (submit may have worked)
             end_time = time.time()
             logger.info(f"抢票流程完成，耗时: {end_time - start_time:.2f}秒")
             return True
@@ -413,17 +519,24 @@ class DamaiBot:
             if self.run_ticket_grabbing():
                 logger.info("抢票成功！")
                 return True
-            else:
-                logger.warning(f"第 {attempt + 1} 次尝试失败")
-                if attempt < max_retries - 1:
-                    logger.info("2秒后重试...")
-                    time.sleep(2)
-                    # 重新初始化驱动
-                    try:
-                        self.driver.quit()
-                    except Exception:
-                        pass
-                    self._setup_driver()
+
+            # Fast retry within same session
+            for fast_attempt in range(self.config.fast_retry_count):
+                logger.info(f"快速重试 {fast_attempt + 1}/{self.config.fast_retry_count}...")
+                time.sleep(self.config.fast_retry_interval_ms / 1000)
+                if self._fast_retry_from_current_state():
+                    logger.info("快速重试成功！")
+                    return True
+
+            # Full driver recreation
+            logger.warning(f"第 {attempt + 1} 次尝试及快速重试均失败")
+            if attempt < max_retries - 1:
+                logger.info("重建驱动后重试...")
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+                self._setup_driver()
 
         logger.error("所有尝试均失败")
         return False

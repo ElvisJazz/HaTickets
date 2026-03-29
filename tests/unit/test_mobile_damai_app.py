@@ -2,6 +2,7 @@
 """Unit tests for mobile/damai_app.py — DamaiBot class."""
 
 import time as _time_module
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from unittest.mock import Mock, patch, call, PropertyMock
@@ -361,9 +362,11 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "verify_order_result", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.side_effect = [0.0, 1.5]
             # Mock find_element for price container + target_price
@@ -389,6 +392,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
              patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -419,6 +423,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click") as smart_click, \
              patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -450,6 +455,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "smart_wait_for_element", return_value=False), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -477,6 +483,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=False), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
@@ -494,6 +501,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", side_effect=[True, False]), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -524,9 +532,11 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "verify_order_result", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.side_effect = [0.0, 2.0]
             # First find_element raises, triggering backup path
@@ -550,6 +560,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", side_effect=RuntimeError("boom")), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
@@ -577,9 +588,11 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", side_effect=smart_click_side_effect), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "verify_order_result", return_value="timeout"), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.side_effect = [0.0, 1.0]
             mock_price_container = Mock()
@@ -603,6 +616,7 @@ class TestRunTicketGrabbing:
                  "quantity_picker": False,
                  "submit_button": False,
              }), \
+             patch.object(bot, "wait_for_sale_start"), \
              patch.object(bot, "smart_wait_and_click", return_value=False), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.return_value = 0.0
@@ -709,6 +723,7 @@ class TestRunWithRetry:
     def test_run_with_retry_success_second_attempt(self, bot):
         """Fails once, sets up driver again, succeeds second time."""
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, True]), \
+             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver") as mock_setup, \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
@@ -719,6 +734,7 @@ class TestRunWithRetry:
     def test_run_with_retry_all_fail(self, bot):
         """All retries fail, returns False."""
         with patch.object(bot, "run_ticket_grabbing", return_value=False), \
+             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver"), \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
@@ -728,6 +744,7 @@ class TestRunWithRetry:
     def test_run_with_retry_driver_quit_between_retries(self, bot):
         """Between retries, driver.quit and _setup_driver are called."""
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, False, True]), \
+             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver") as mock_setup, \
              patch("mobile.damai_app.time"):
             bot.run_with_retry(max_retries=3)
@@ -742,9 +759,227 @@ class TestRunWithRetry:
 
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, True]), \
              patch.object(bot, "_setup_driver") as mock_setup, \
+             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
 
         # Despite quit failure, retry continued and succeeded
         assert result is True
-        mock_setup.assert_called_once()
+
+    def test_run_with_retry_uses_fast_retry(self, bot):
+        """Verify fast retry is attempted before driver recreation."""
+        with patch.object(bot, "run_ticket_grabbing", side_effect=[False, False]), \
+             patch.object(bot, "_fast_retry_from_current_state", return_value=False) as fast_retry, \
+             patch.object(bot, "_setup_driver"), \
+             patch("mobile.damai_app.time"):
+            bot.run_with_retry(max_retries=2)
+
+        # fast_retry called fast_retry_count times per failed attempt
+        assert fast_retry.call_count == bot.config.fast_retry_count * 2
+
+
+# ---------------------------------------------------------------------------
+# wait_for_sale_start
+# ---------------------------------------------------------------------------
+
+class TestWaitForSaleStart:
+    def test_wait_for_sale_start_no_config(self, bot):
+        """sell_start_time=None, returns immediately without sleeping."""
+        bot.config.sell_start_time = None
+        with patch("mobile.damai_app.time.sleep") as mock_sleep:
+            bot.wait_for_sale_start()
+        mock_sleep.assert_not_called()
+
+    def test_wait_for_sale_start_already_passed(self, bot):
+        """Time in past, returns immediately."""
+        bot.config.sell_start_time = "2020-01-01T10:00:00+08:00"
+        with patch("mobile.damai_app.time.sleep") as mock_sleep:
+            bot.wait_for_sale_start()
+        mock_sleep.assert_not_called()
+
+    def test_wait_for_sale_start_waits_and_polls(self, bot):
+        """Mock time so sale is in future, verify sleep called, then polling finds button."""
+        _tz = timezone(timedelta(hours=8))
+        # Sale starts 10 seconds from "now"
+        future_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
+        bot.config.sell_start_time = future_time.isoformat()
+        bot.config.countdown_lead_ms = 3000
+
+        # Track datetime.now calls: first returns "now" (10s before sale),
+        # then returns times during polling
+        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
+        now_calls = [0]
+
+        def mock_now(tz=None):
+            now_calls[0] += 1
+            if now_calls[0] <= 2:
+                # Initial check + sleep calculation
+                return now_base
+            # During polling, return past the sale time
+            return future_time + timedelta(seconds=1)
+
+        with patch("mobile.damai_app.datetime") as mock_dt, \
+             patch("mobile.damai_app.time.sleep") as mock_sleep, \
+             patch.object(bot, "_has_element", return_value=True):
+            mock_dt.fromisoformat = datetime.fromisoformat
+            mock_dt.now = mock_now
+            bot.wait_for_sale_start()
+
+        # Should have slept for the wait period (10s - 3s lead = 7s)
+        assert mock_sleep.call_count >= 1
+        # First sleep should be ~7 seconds
+        first_sleep_arg = mock_sleep.call_args_list[0][0][0]
+        assert 6.5 < first_sleep_arg < 7.5
+
+
+# ---------------------------------------------------------------------------
+# _fast_retry_from_current_state
+# ---------------------------------------------------------------------------
+
+class TestFastRetry:
+    def test_fast_retry_from_detail_page(self, bot):
+        """probe returns detail_page, re-runs full flow."""
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "detail_page",
+                "purchase_button": True,
+                "price_container": True,
+                "quantity_picker": False,
+                "submit_button": False,
+             }), \
+             patch.object(bot, "run_ticket_grabbing", return_value=True) as run_tg:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        run_tg.assert_called_once()
+
+    def test_fast_retry_from_order_confirm_page(self, bot):
+        """probe returns order_confirm_page, re-attempts submit only."""
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "order_confirm_page",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": True,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click:
+            result = bot._fast_retry_from_current_state()
+
+        assert result is True
+        smart_click.assert_called_once()
+
+    def test_fast_retry_from_unknown_presses_back(self, bot):
+        """probe returns unknown, press_keycode(4) called, then re-runs flow."""
+        with patch.object(bot, "probe_current_page", return_value={
+                "state": "unknown",
+                "purchase_button": False,
+                "price_container": False,
+                "quantity_picker": False,
+                "submit_button": False,
+             }), \
+             patch.object(bot, "run_ticket_grabbing", return_value=False) as run_tg, \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot._fast_retry_from_current_state()
+
+        bot.driver.press_keycode.assert_called_once_with(4)
+        run_tg.assert_called_once()
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# verify_order_result
+# ---------------------------------------------------------------------------
+
+class TestVerifyOrderResult:
+    def test_verify_order_success_payment_activity(self, bot):
+        """Activity contains 'Pay', returns 'success'."""
+        with patch.object(bot, "_get_current_activity", return_value="com.alipay.android.app.PayActivity"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "success"
+
+    def test_verify_order_success_payment_text(self, bot):
+        """Element contains '支付', returns 'success'."""
+        def has_element_side_effect(by, value):
+            return '支付' in value
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "success"
+
+    def test_verify_order_sold_out(self, bot):
+        """Element contains '已售罄', returns 'sold_out'."""
+        def has_element_side_effect(by, value):
+            return '已售罄' in value
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "sold_out"
+
+    def test_verify_order_timeout(self, bot):
+        """No indicators found, returns 'timeout'."""
+        call_count = [0]
+
+        def mock_time_func():
+            call_count[0] += 1
+            # Return increasing time so we exceed timeout quickly
+            return call_count[0] * 3.0
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", return_value=False), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time = mock_time_func
+            mock_time.sleep = Mock()
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "timeout"
+
+    def test_verify_order_captcha(self, bot):
+        """Element contains '验证', returns 'captcha'."""
+        def has_element_side_effect(by, value):
+            # Skip 支付 and 已售罄/库存不足/暂时无票, match 验证
+            if '支付' in value:
+                return False
+            if '已售罄' in value or '库存不足' in value or '暂时无票' in value:
+                return False
+            if '验证' in value:
+                return True
+            return False
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "captcha"
+
+    def test_verify_order_existing_order(self, bot):
+        """Element contains '未支付', returns 'existing_order'."""
+        def has_element_side_effect(by, value):
+            if '支付' in value and '未' not in value:
+                return False
+            if '已售罄' in value or '库存不足' in value or '暂时无票' in value:
+                return False
+            if '滑块' in value or '验证' in value:
+                return False
+            if '未支付' in value:
+                return True
+            return False
+
+        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.1]
+            result = bot.verify_order_result(timeout=5)
+
+        assert result == "existing_order"

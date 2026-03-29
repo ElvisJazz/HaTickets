@@ -84,6 +84,8 @@ class TestFullTicketGrabbingFlow:
 
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "verify_order_result", return_value="success"), \
                  patch.object(bot, "probe_current_page", return_value={
                      "state": "detail_page",
                      "purchase_button": True,
@@ -126,6 +128,7 @@ class TestFullTicketGrabbingFlow:
 
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "wait_for_sale_start"), \
                  patch.object(bot, "probe_current_page", return_value={
                      "state": "detail_page",
                      "purchase_button": True,
@@ -168,7 +171,8 @@ class TestRetryWithDriverRecreation:
             bot = DamaiBot()
 
             # Make run_ticket_grabbing always fail
-            with patch.object(bot, "run_ticket_grabbing", return_value=False):
+            with patch.object(bot, "run_ticket_grabbing", return_value=False), \
+                 patch.object(bot, "_fast_retry_from_current_state", return_value=False):
                 with patch.object(bot, "_setup_driver") as mock_setup:
                     result = bot.run_with_retry(max_retries=3)
 
