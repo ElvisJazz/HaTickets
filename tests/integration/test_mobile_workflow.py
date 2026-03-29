@@ -57,6 +57,7 @@ class TestFullTicketGrabbingFlow:
         mock_driver = Mock()
         mock_driver.update_settings = Mock()
         mock_driver.quit = Mock()
+        mock_driver.current_activity = "ProjectDetailActivity"
         mock_el = _make_mock_element()
 
         mock_config = Config(
@@ -84,7 +85,9 @@ class TestFullTicketGrabbingFlow:
 
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "check_session_valid", return_value=True), \
                  patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "select_performance_date"), \
                  patch.object(bot, "wait_for_page_state", return_value={
                      "state": "order_confirm_page",
                      "purchase_button": False,
@@ -108,6 +111,7 @@ class TestFullTicketGrabbingFlow:
         mock_driver = Mock()
         mock_driver.update_settings = Mock()
         mock_driver.quit = Mock()
+        mock_driver.current_activity = "ProjectDetailActivity"
         mock_el = _make_mock_element()
 
         mock_config = Config(
@@ -135,7 +139,9 @@ class TestFullTicketGrabbingFlow:
 
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
+                 patch.object(bot, "check_session_valid", return_value=True), \
                  patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "select_performance_date"), \
                  patch.object(bot, "wait_for_page_state", return_value={
                      "state": "order_confirm_page",
                      "purchase_button": False,

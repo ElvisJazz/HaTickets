@@ -548,12 +548,20 @@ class TestRunTicketGrabbing:
         assert result is False
 
     def test_run_ticket_grabbing_price_exception_tries_backup(self, bot):
-        """First price attempt raises, backup via wait.until succeeds."""
+        """Text match fails, index find_element raises, backup via wait.until succeeds."""
         mock_price_container = Mock()
         mock_target = _make_mock_element()
         mock_price_container.find_element.return_value = mock_target
 
+        def ultra_fast_click_side_effect(by, value, timeout=1.5):
+            # Fail the text-based price match, succeed for everything else
+            if 'textContains("799元")' in str(value):
+                return False
+            return True
+
         with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "check_session_valid", return_value=True), \
+             patch.object(bot, "select_performance_date"), \
              patch.object(bot, "probe_current_page", return_value={
                  "state": "detail_page",
                  "purchase_button": True,
@@ -570,12 +578,12 @@ class TestRunTicketGrabbing:
                  "submit_button": True,
              }), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "verify_order_result", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
             mock_time.time.side_effect = [0.0, 2.0]
-            # First find_element raises, triggering backup path
+            # find_element raises for price container, triggering wait.until backup
             bot.driver.find_element.side_effect = NoSuchElementException("not found")
             bot.wait.until = Mock(return_value=mock_price_container)
             bot.driver.find_elements.return_value = []
