@@ -85,6 +85,13 @@ class TestFullTicketGrabbingFlow:
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
                  patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "wait_for_page_state", return_value={
+                     "state": "order_confirm_page",
+                     "purchase_button": False,
+                     "price_container": True,
+                     "quantity_picker": False,
+                     "submit_button": True,
+                 }), \
                  patch.object(bot, "verify_order_result", return_value="success"), \
                  patch.object(bot, "probe_current_page", return_value={
                      "state": "detail_page",
@@ -129,6 +136,13 @@ class TestFullTicketGrabbingFlow:
             bot = DamaiBot()
             with patch.object(bot, "dismiss_startup_popups"), \
                  patch.object(bot, "wait_for_sale_start"), \
+                 patch.object(bot, "wait_for_page_state", return_value={
+                     "state": "order_confirm_page",
+                     "purchase_button": False,
+                     "price_container": True,
+                     "quantity_picker": False,
+                     "submit_button": True,
+                 }), \
                  patch.object(bot, "probe_current_page", return_value={
                      "state": "detail_page",
                      "purchase_button": True,

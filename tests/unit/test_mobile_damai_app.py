@@ -44,6 +44,7 @@ def bot():
     mock_driver.find_element = Mock()
     mock_driver.find_elements = Mock(return_value=[])
     mock_driver.quit = Mock()
+    mock_driver.current_activity = "ProjectDetailActivity"
 
     mock_config = Config(
         server_url="http://127.0.0.1:4723",
@@ -363,6 +364,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -393,6 +401,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
              patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
              patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -424,6 +439,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
              patch.object(bot, "smart_wait_and_click") as smart_click, \
              patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -456,6 +478,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "sku_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "smart_wait_for_element", return_value=False), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
@@ -471,7 +500,7 @@ class TestRunTicketGrabbing:
             result = bot.run_ticket_grabbing()
 
         assert result is False
-        assert "确认页提交按钮未找到" in caplog.text
+        assert "未进入订单确认页" in caplog.text
 
     def test_run_ticket_grabbing_city_fail(self, bot):
         """City selection fails, returns False immediately."""
@@ -533,6 +562,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
              patch.object(bot, "smart_wait_and_click", return_value=True), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -589,6 +625,13 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
              patch.object(bot, "smart_wait_and_click", side_effect=smart_click_side_effect), \
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
@@ -623,6 +666,42 @@ class TestRunTicketGrabbing:
             bot.run_ticket_grabbing()
 
         bot.driver.quit.assert_not_called()
+
+    def test_run_ticket_grabbing_skips_user_click_when_order_confirm_page_directly_opened(self, bot):
+        """Direct jump to order confirm page should skip manual user selection."""
+        bot.config.if_commit_order = False
+
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "sku_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
+             patch.object(bot, "smart_wait_for_element", return_value=True), \
+             patch.object(bot, "ultra_fast_click", return_value=True), \
+             patch.object(bot, "ultra_batch_click") as batch_click, \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 0.8]
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        batch_click.assert_not_called()
 
 
 class TestPageStateHelpers:
@@ -983,3 +1062,189 @@ class TestVerifyOrderResult:
             result = bot.verify_order_result(timeout=5)
 
         assert result == "existing_order"
+
+
+# ---------------------------------------------------------------------------
+# select_performance_date
+# ---------------------------------------------------------------------------
+
+class TestSelectPerformanceDate:
+    def test_select_performance_date_found(self, bot, caplog):
+        """Date text found and clicked successfully."""
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "ultra_fast_click", return_value=True) as ufc:
+            bot.select_performance_date()
+
+        ufc.assert_called_once_with(
+            AppiumBy.ANDROID_UIAUTOMATOR,
+            'new UiSelector().textContains("12.06")',
+            timeout=1.0,
+        )
+        assert "选择场次日期: 12.06" in caplog.text
+
+    def test_select_performance_date_not_found(self, bot, caplog):
+        """Date not found, continues gracefully without error."""
+        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
+             patch.object(bot, "ultra_fast_click", return_value=False) as ufc:
+            bot.select_performance_date()
+
+        ufc.assert_called_once()
+        assert "未找到日期" in caplog.text
+
+    def test_select_performance_date_no_date_configured(self, bot):
+        """No date in config, returns immediately without clicking."""
+        bot.config.date = ""
+        with patch.object(bot, "ultra_fast_click") as ufc:
+            bot.select_performance_date()
+
+        ufc.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# check_session_valid
+# ---------------------------------------------------------------------------
+
+class TestCheckSessionValid:
+    def test_check_session_valid_logged_in(self, bot):
+        """No login indicators, returns True."""
+        with patch.object(bot, "_get_current_activity", return_value="ProjectDetailActivity"), \
+             patch.object(bot, "_has_element", return_value=False):
+            result = bot.check_session_valid()
+
+        assert result is True
+
+    def test_check_session_valid_login_activity(self, bot, caplog):
+        """LoginActivity detected, returns False."""
+        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
+             patch.object(bot, "_get_current_activity", return_value="com.taobao.login.LoginActivity"):
+            result = bot.check_session_valid()
+
+        assert result is False
+        assert "登录已过期" in caplog.text
+
+    def test_check_session_valid_sign_activity(self, bot, caplog):
+        """SignActivity detected, returns False."""
+        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
+             patch.object(bot, "_get_current_activity", return_value="com.taobao.SignActivity"):
+            result = bot.check_session_valid()
+
+        assert result is False
+        assert "登录已过期" in caplog.text
+
+    def test_check_session_valid_login_prompt(self, bot, caplog):
+        """'请先登录' text detected on page, returns False."""
+        def has_element_side_effect(by, value):
+            return '请先登录' in value
+
+        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
+             patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect):
+            result = bot.check_session_valid()
+
+        assert result is False
+        assert "登录提示" in caplog.text
+
+    def test_check_session_valid_register_prompt(self, bot, caplog):
+        """'登录/注册' text detected on page, returns False."""
+        def has_element_side_effect(by, value):
+            return '登录/注册' in value
+
+        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
+             patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
+             patch.object(bot, "_has_element", side_effect=has_element_side_effect):
+            result = bot.check_session_valid()
+
+        assert result is False
+        assert "登录提示" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Price selection (text match + index fallback)
+# ---------------------------------------------------------------------------
+
+class TestPriceSelection:
+    def test_price_selection_text_match_success(self, bot):
+        """Text-based price match works, index fallback not used."""
+        with patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "check_session_valid", return_value=True), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "select_performance_date"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "ultra_fast_click", return_value=True) as ufc, \
+             patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "verify_order_result", return_value="success"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 1.5]
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        # ultra_fast_click should have been called with the price text selector
+        price_call_found = any(
+            'textContains("799元")' in str(c)
+            for c in ufc.call_args_list
+        )
+        assert price_call_found, f"Expected price text selector call, got: {ufc.call_args_list}"
+
+    def test_price_selection_falls_back_to_index(self, bot, caplog):
+        """Text match fails, index-based fallback used."""
+        call_count = [0]
+
+        def ultra_fast_click_side_effect(by, value, timeout=1.5):
+            call_count[0] += 1
+            # First call with textContains (price) returns False to trigger fallback
+            if 'textContains("799元")' in str(value):
+                return False
+            return True
+
+        with caplog.at_level("INFO", logger="mobile.damai_app"), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "check_session_valid", return_value=True), \
+             patch.object(bot, "probe_current_page", return_value={
+                 "state": "detail_page",
+                 "purchase_button": True,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": False,
+             }), \
+             patch.object(bot, "wait_for_sale_start"), \
+             patch.object(bot, "select_performance_date"), \
+             patch.object(bot, "wait_for_page_state", return_value={
+                 "state": "order_confirm_page",
+                 "purchase_button": False,
+                 "price_container": True,
+                 "quantity_picker": False,
+                 "submit_button": True,
+             }), \
+             patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
+             patch.object(bot, "ultra_batch_click"), \
+             patch.object(bot, "verify_order_result", return_value="success"), \
+             patch("mobile.damai_app.time") as mock_time:
+            mock_time.time.side_effect = [0.0, 1.5]
+            # Mock price container for index-based fallback
+            mock_price_container = Mock()
+            mock_target = _make_mock_element()
+            mock_price_container.find_element.return_value = mock_target
+            bot.driver.find_element.return_value = mock_price_container
+            bot.driver.find_elements.return_value = []
+
+            result = bot.run_ticket_grabbing()
+
+        assert result is True
+        assert "文本匹配失败，使用索引选择票价" in caplog.text

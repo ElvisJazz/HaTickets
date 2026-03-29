@@ -15,5 +15,13 @@
   "price": "内场1199元",
   "price_index": 5,
   "if_commit_order": true,
-  "probe_only": false
+  "probe_only": false,
+  // 开售时间 (ISO格式，用于倒计时等待，null=立即购买)
+  "sell_start_time": null,
+  // 提前轮询时间 (毫秒)
+  "countdown_lead_ms": 3000,
+  // 快速重试次数 (不重建driver)
+  "fast_retry_count": 5,
+  // 快速重试间隔 (毫秒)
+  "fast_retry_interval_ms": 500
 }

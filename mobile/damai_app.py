@@ -181,6 +181,19 @@ class DamaiBot:
                 continue
         return False
 
+    def wait_for_page_state(self, expected_states, timeout=5, poll_interval=0.2):
+        """轮询等待页面进入指定状态，返回最后一次探测结果。"""
+        deadline = time.time() + timeout
+        last_probe = None
+
+        while time.time() < deadline:
+            last_probe = self.probe_current_page()
+            if last_probe["state"] in expected_states:
+                return last_probe
+            time.sleep(poll_interval)
+
+        return last_probe if last_probe is not None else self.probe_current_page()
+
     def _has_element(self, by, value):
         """快速判断元素是否存在，不等待点击状态。"""
         try:
@@ -194,6 +207,35 @@ class DamaiBot:
             return self.driver.current_activity or ""
         except Exception:
             return ""
+
+    def select_performance_date(self):
+        """选择演出场次日期"""
+        if not self.config.date:
+            return
+
+        date_selector = f'new UiSelector().textContains("{self.config.date}")'
+        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, date_selector, timeout=1.0):
+            logger.info(f"选择场次日期: {self.config.date}")
+        else:
+            logger.debug(f"未找到日期 '{self.config.date}'，使用默认场次")
+
+    def check_session_valid(self):
+        """检查大麦 App 登录状态是否有效"""
+        activity = self._get_current_activity()
+        if "LoginActivity" in activity or "SignActivity" in activity:
+            logger.error("检测到登录页面，大麦 App 登录已过期，请重新登录")
+            return False
+
+        login_prompt_selectors = [
+            'new UiSelector().textContains("请先登录")',
+            'new UiSelector().textContains("登录/注册")',
+        ]
+        for selector in login_prompt_selectors:
+            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, selector):
+                logger.error("检测到登录提示，请重新登录大麦 App")
+                return False
+
+        return True
 
     def wait_for_sale_start(self):
         """等待开售时间，在开售前 countdown_lead_ms 毫秒开始轮询。"""
@@ -358,6 +400,10 @@ class DamaiBot:
             start_time = time.time()
 
             self.dismiss_startup_popups()
+
+            if not self.check_session_valid():
+                return False
+
             page_probe = self.probe_current_page()
 
             if page_probe["state"] not in {"detail_page", "sku_page"}:
@@ -381,6 +427,9 @@ class DamaiBot:
             self.wait_for_sale_start()
 
             if page_probe["state"] == "detail_page":
+                # 0. 选择场次日期（在城市选择前）
+                self.select_performance_date()
+
                 # 1. 城市选择 - 准备多个备选方案
                 logger.info("选择城市...")
                 city_selectors = [
@@ -407,33 +456,32 @@ class DamaiBot:
 
             # 3. 票价选择 - 优化查找逻辑
             logger.info("选择票价...")
+            # Try text-based price matching first
             try:
-                # 直接尝试点击，不等待容器，实际每次都失败，只能等待
-                price_container = self.driver.find_element(By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')
-                # price_container = self.wait.until(  # 等待找到容器
-                #     EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
-                # 在容器内找 index=1 且 clickable="true" 的 FrameLayout【因为799元的票价是排在第二的，但是page里text是空的被隐藏了】
-                target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                )
-                self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
-            except Exception as e:
-                logger.warning(f"票价选择失败，启动备用方案: {e}")
-                # 备用方案
-                # 先找到大容器
-                price_container = self.wait.until(
-                    EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
-                # 在容器内找 index=1 且 clickable="true" 的 FrameLayout【因为799元的票价是排在第二的，但是page里text是空的被隐藏了】
-                target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                )
-                self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
-
-                # if not self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR,
-                #                              'new UiSelector().textMatches(".*799.*|.*\\d+元.*")'):
-                #     return False
+                price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
+                if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=1.0):
+                    logger.info(f"通过文本匹配选择票价: {self.config.price}")
+                else:
+                    raise Exception("text match failed")
+            except Exception:
+                # Fall back to index-based selection (existing code)
+                logger.info(f"文本匹配失败，使用索引选择票价: price_index={self.config.price_index}")
+                try:
+                    price_container = self.driver.find_element(By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')
+                    target_price = price_container.find_element(
+                        AppiumBy.ANDROID_UIAUTOMATOR,
+                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
+                    )
+                    self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
+                except Exception as e:
+                    logger.warning(f"票价选择失败，启动备用方案: {e}")
+                    price_container = self.wait.until(
+                        EC.presence_of_element_located((By.ID, 'cn.damai:id/project_detail_perform_price_flowlayout')))
+                    target_price = price_container.find_element(
+                        AppiumBy.ANDROID_UIAUTOMATOR,
+                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
+                    )
+                    self.driver.execute_script('mobile: clickGesture', {'elementId': target_price.id})
 
             # 4. 数量选择
             logger.info("选择数量...")
@@ -465,12 +513,19 @@ class DamaiBot:
                 # 备用按钮文本
                 self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
 
-            # 6. 批量选择用户
-            logger.info("选择用户...")
-            user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
-                           self.config.users]
-            # self.batch_click(user_clicks, delay=0.05)  # 极短延迟
-            self.ultra_batch_click(user_clicks)
+            post_buy_probe = self.wait_for_page_state({"order_confirm_page"}, timeout=5)
+            if post_buy_probe["state"] != "order_confirm_page":
+                # 6. 批量选择用户
+                logger.info("选择用户...")
+                user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
+                               self.config.users]
+                # self.batch_click(user_clicks, delay=0.05)  # 极短延迟
+                self.ultra_batch_click(user_clicks)
+                post_buy_probe = self.wait_for_page_state({"order_confirm_page"}, timeout=5)
+
+            if post_buy_probe["state"] != "order_confirm_page":
+                logger.warning("未进入订单确认页，请检查票档可用性或观演人配置")
+                return False
 
             submit_selectors = [
                 (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
