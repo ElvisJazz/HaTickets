@@ -4,9 +4,9 @@
 
 ## 法律说明
 
-- 开源协议：见 [LICENSE](/Users/andrew/Documents/GitHub/HaTickets/LICENSE)
-- 版权与商标声明：见 [NOTICE](/Users/andrew/Documents/GitHub/HaTickets/NOTICE)
-- 免责申明：见 [DISCLAIMER.md](/Users/andrew/Documents/GitHub/HaTickets/DISCLAIMER.md)
+- 开源协议：见 [LICENSE](./LICENSE)
+- 版权与商标声明：见 [NOTICE](./NOTICE)
+- 免责申明：见 [DISCLAIMER.md](./DISCLAIMER.md)
 
 ## 当前状态
 
@@ -121,7 +121,7 @@ appium --port 4723
 
 ### 第 4 步：修改配置
 
-编辑 [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc)。
+编辑 [mobile/config.jsonc](./mobile/config.jsonc)。
 
 推荐你第一次先填成这种“安全模式”：
 
@@ -181,7 +181,7 @@ appium --port 4723
 
 ### 第 6 步：做“不支付验证”
 
-把 [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc) 改成：
+把 [mobile/config.jsonc](./mobile/config.jsonc) 改成：
 
 ```jsonc
 "probe_only": false,
@@ -241,7 +241,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 最常见原因是：
 
-- [mobile/config.jsonc](/Users/andrew/Documents/GitHub/HaTickets/mobile/config.jsonc) 里的 `users` 写的是占位符，不是真实名字
+- [mobile/config.jsonc](./mobile/config.jsonc) 里的 `users` 写的是占位符，不是真实名字
 - 你的大麦账号里还没有配置对应观演人
 
 ### 5. 脚本没有进入确认页
@@ -264,7 +264,7 @@ cd web
 python damai.py
 ```
 
-首次运行会打开 Chrome 登录，配置文件是 [web/config.json](/Users/andrew/Documents/GitHub/HaTickets/web/config.json)。
+首次运行会打开 Chrome 登录，配置文件是 [web/config.json](./web/config.json)。
 
 ### Desktop 端
 
@@ -305,4 +305,4 @@ poetry run pytest
 
 ## 免责声明
 
-仅供学习和研究使用。请自行承担使用风险，并遵守平台规则。更完整的说明见 [DISCLAIMER.md](/Users/andrew/Documents/GitHub/HaTickets/DISCLAIMER.md)。
+仅供学习和研究使用。请自行承担使用风险，并遵守平台规则。更完整的说明见 [DISCLAIMER.md](./DISCLAIMER.md)。

@@ -1,7 +1,7 @@
 # 安卓端 V2 版本介绍
 
 > 这份文档主要保留移动端实现思路。  
-> 当前实际使用时，请优先参考根目录 [README.md](/Users/andrew/Documents/GitHub/HaTickets/README.md) 和 [quick-start.md](/Users/andrew/Documents/GitHub/HaTickets/docs/quick-start.md)。
+> 当前实际使用时，请优先参考根目录 [README.md](../README.md) 和 [quick-start.md](./quick-start.md)。
 
 ## 执行命令
 
