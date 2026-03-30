@@ -22,15 +22,12 @@
 | `Web` | `web/` | 可用但次选 | Selenium 控制 Chrome |
 | `Desktop` | `desktop/` | 不可用 | 官方渠道和风控已限制，当前不要再作为可执行方案使用 |
 
-> 如果你是第一次用，直接走 `Mobile + 安卓真机`。  
-> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。  
+> 如果你是第一次用，直接走 `Mobile + 安卓真机`。
+> 如果你只想先验证流程，不想误提交订单，先把 `if_commit_order` 设成 `false`。
 > 如果你看到旧文档里提到 `Desktop`，把它理解成“历史实现”，不要再按它准备环境。
 
-## 一图看懂
+**当前主流程在设计使用`Mobile + 安卓真机`方案**
 
-![移动端抢票流程](docs/images/tickets-process.png)
-
-上图对应的是当前项目的核心思路：  
 先定位目标演出，再进入票档页和确认页；如果配置了 `item_url + auto_navigate`，脚本可以从大麦首页自动搜到目标演出。如果配置了 `if_commit_order: false`，脚本会停在“立即提交”之前，不会帮你支付。
 
 如果你希望把“自然语言提示词”也接进来，例如：
@@ -245,7 +242,7 @@ appium --port 4723
 
 ### 1. `adb: command not found`
 
-说明 Android SDK 的 `platform-tools` 没进环境变量。  
+说明 Android SDK 的 `platform-tools` 没进环境变量。
 最直接的办法是：
 
 ```bash
@@ -264,7 +261,7 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 ### 3. 打开大麦后提示“访问被拒绝”
 
-这通常是风控，不一定是代码问题。  
+这通常是风控，不一定是代码问题。
 模拟器比真机更容易触发，所以推荐用真机。
 
 ### 4. 脚本找不到观演人
