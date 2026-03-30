@@ -1287,6 +1287,7 @@ class TestWaitForSaleStart:
         time_values = chain([0.0, 0.2, 0.4], repeat(0.4))
 
         with patch("mobile.damai_app.time.time", side_effect=time_values), \
+             patch("mobile.damai_app.logger"), \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
              patch.object(bot, "_is_sale_ready", side_effect=[False, True]) as is_ready:
             bot.wait_for_sale_start()
@@ -1299,6 +1300,7 @@ class TestWaitForSaleStart:
         bot.config.wait_cta_ready_timeout_ms = 100
 
         with patch("mobile.damai_app.time.time", side_effect=chain([0.0, 0.05, 0.11], repeat(0.11))), \
+             patch("mobile.damai_app.logger"), \
              patch("mobile.damai_app.time.sleep") as mock_sleep, \
              patch.object(bot, "_is_sale_ready", return_value=False):
             bot.wait_for_sale_start()
