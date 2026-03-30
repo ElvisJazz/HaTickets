@@ -117,3 +117,16 @@ class Config:
             config.get('app_activity', '.launcher.splash.SplashMainActivity'),
             config.get('automation_name', 'UiAutomator2'),
         )
+
+
+def load_config_dict(path: str) -> dict:
+    """Load a JSONC config file and return a raw dict."""
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    return json.loads(_strip_jsonc_comments(raw))
+
+
+def save_config_dict(path: str, data: dict) -> None:
+    """Save a dict to a JSON file."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)

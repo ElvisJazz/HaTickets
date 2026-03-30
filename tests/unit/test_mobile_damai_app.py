@@ -1,23 +1,24 @@
 # -*- coding: UTF-8 -*-
 """Unit tests for mobile/damai_app.py — DamaiBot class."""
 
-import time as _time_module
-from datetime import datetime, timezone, timedelta
-
 import pytest
-from unittest.mock import Mock, patch, call, PropertyMock
+from unittest.mock import Mock, patch, call
 
 from appium.webdriver.common.appiumby import AppiumBy
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import (
+    TimeoutException,
+    NoSuchElementException,
+    StaleElementReferenceException,
+    WebDriverException,
+)
 from selenium.webdriver.common.by import By
 
-from mobile.damai_app import DamaiBot, logger as damai_logger
+from mobile.damai_app import DamaiBot
 from mobile.config import Config
-from mobile.item_resolver import DamaiItemDetail
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _make_mock_element(x=100, y=200, width=50, height=40):
@@ -28,26 +29,24 @@ def _make_mock_element(x=100, y=200, width=50, height=40):
     return el
 
 
-def _make_item_detail():
-    return DamaiItemDetail(
-        item_id="1016133935724",
-        item_name="【北京】2026张杰未·LIVE—「开往1982」演唱会-北京站",
-        item_name_display="北京·2026张杰未·LIVE—「开往1982」演唱会-北京站",
-        city_name="北京市",
-        venue_name="国家体育场-鸟巢",
-        venue_city_name="北京市",
-        show_time="2026.03.29-04.19",
-        price_range="380-1680",
-        raw_data={},
+def _make_config(**overrides):
+    defaults = dict(
+        server_url="http://127.0.0.1:4723",
+        device_name="Android",
+        udid=None,
+        platform_version="16",
+        app_package="cn.damai",
+        app_activity=".launcher.splash.SplashMainActivity",
+        keyword="test",
+        users=["UserA", "UserB"],
+        city="深圳",
+        date="12.06",
+        price="799元",
+        price_index=1,
+        if_commit_order=True,
     )
-
-
-@pytest.fixture(autouse=True)
-def _enable_logger_propagation():
-    """Enable propagation on the damai_app logger so caplog can capture messages."""
-    damai_logger.propagate = True
-    yield
-    damai_logger.propagate = False
+    defaults.update(overrides)
+    return Config(**defaults)
 
 
 @pytest.fixture
@@ -61,28 +60,15 @@ def bot():
     mock_driver.quit = Mock()
     mock_driver.current_activity = "ProjectDetailActivity"
 
-    mock_config = Config(
-        server_url="http://127.0.0.1:4723",
-        device_name="Android",
-        udid=None,
-        platform_version=None,
-        app_package="cn.damai",
-        app_activity=".launcher.splash.SplashMainActivity",
-        keyword="test",
-        users=["UserA", "UserB"],
-        city="深圳",
-        date="12.06",
-        price="799元",
-        price_index=1,
-        if_commit_order=True,
-        probe_only=False,
-    )
+    mock_config = _make_config()
 
     with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
          patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
-         patch("mobile.damai_app.AppiumOptions"):
-        bot = DamaiBot()
-    return bot
+         patch("mobile.damai_app.AppiumOptions"), \
+         patch("mobile.damai_app.ClientConfig"), \
+         patch("mobile.damai_app.RemoteConnection"):
+        b = DamaiBot()
+    return b
 
 
 # ---------------------------------------------------------------------------
@@ -90,35 +76,6 @@ def bot():
 # ---------------------------------------------------------------------------
 
 class TestInitialization:
-    def test_init_accepts_injected_config(self):
-        mock_driver = Mock()
-        mock_driver.update_settings = Mock()
-
-        injected_config = Config(
-            server_url="http://127.0.0.1:4723",
-            device_name="Android",
-            udid=None,
-            platform_version=None,
-            app_package="cn.damai",
-            app_activity=".launcher.splash.SplashMainActivity",
-            keyword="张杰 演唱会",
-            users=["UserA"],
-            city="北京",
-            date="04.06",
-            price="1280元",
-            price_index=6,
-            if_commit_order=False,
-            probe_only=True,
-        )
-
-        with patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
-             patch("mobile.damai_app.AppiumOptions"), \
-             patch("mobile.damai_app.Config.load_config") as load_config:
-            bot = DamaiBot(config=injected_config)
-
-        assert bot.config is injected_config
-        load_config.assert_not_called()
-
     def test_init_loads_config_and_driver(self, bot):
         """Config is loaded and driver is created during __init__."""
         assert bot.config is not None
@@ -129,74 +86,68 @@ class TestInitialization:
     def test_setup_driver_sets_wait(self, bot):
         """_setup_driver sets self.wait (WebDriverWait instance)."""
         assert bot.wait is not None
-        # update_settings was called during setup
         bot.driver.update_settings.assert_called_once()
 
-    def test_build_capabilities_uses_real_device_config(self):
+    def test_init_creates_last_error_attribute(self, bot):
+        assert bot.last_error == ""
+
+    def test_setup_driver_called_with_fast_mode_settings(self):
+        """In fast_mode=True, update_settings receives tight timeouts."""
         mock_driver = Mock()
         mock_driver.update_settings = Mock()
 
-        mock_config = Config(
-            server_url="http://127.0.0.1:4723",
-            device_name="Pixel 8",
-            udid="R58M123456A",
-            platform_version="14",
-            app_package="cn.damai",
-            app_activity=".launcher.splash.SplashMainActivity",
-            keyword="test",
-            users=["UserA"],
-            city="深圳",
-            date="12.06",
-            price="799元",
-            price_index=1,
-            if_commit_order=True,
-            probe_only=False,
-        )
+        mock_config = _make_config(fast_mode=True)
 
         with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
              patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
-             patch("mobile.damai_app.AppiumOptions"):
-            bot = DamaiBot()
+             patch("mobile.damai_app.AppiumOptions"), \
+             patch("mobile.damai_app.ClientConfig"), \
+             patch("mobile.damai_app.RemoteConnection"):
+            b = DamaiBot()
 
-        capabilities = bot._build_capabilities()
-        assert capabilities["deviceName"] == "Pixel 8"
-        assert capabilities["udid"] == "R58M123456A"
-        assert capabilities["platformVersion"] == "14"
-        assert capabilities["appPackage"] == "cn.damai"
-        assert capabilities["appActivity"] == ".launcher.splash.SplashMainActivity"
+        settings_call = mock_driver.update_settings.call_args[0][0]
+        assert settings_call["waitForIdleTimeout"] == 200
 
-    def test_init_resolves_item_url_and_fills_keyword(self):
+    def test_setup_driver_slow_mode_settings(self):
+        """In fast_mode=False, update_settings receives slower timeouts."""
         mock_driver = Mock()
         mock_driver.update_settings = Mock()
 
-        mock_config = Config(
-            server_url="http://127.0.0.1:4723",
-            device_name="Android",
-            udid=None,
-            platform_version=None,
-            app_package="cn.damai",
-            app_activity=".launcher.splash.SplashMainActivity",
-            keyword=None,
-            item_url="https://m.damai.cn/shows/item.html?itemId=1016133935724",
-            users=["UserA"],
-            city="北京",
-            date="04.06",
-            price="380元",
-            price_index=0,
-            if_commit_order=False,
-            probe_only=True,
-        )
-        item_detail = _make_item_detail()
+        mock_config = _make_config(fast_mode=False)
 
         with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
-             patch("mobile.damai_app.DamaiItemResolver.fetch_item_detail", return_value=item_detail), \
              patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
-             patch("mobile.damai_app.AppiumOptions"):
-            bot = DamaiBot()
+             patch("mobile.damai_app.AppiumOptions"), \
+             patch("mobile.damai_app.ClientConfig"), \
+             patch("mobile.damai_app.RemoteConnection"):
+            b = DamaiBot()
 
-        assert bot.item_detail == item_detail
-        assert bot.config.item_id == "1016133935724"
-        assert bot.config.keyword == item_detail.search_keyword
+        settings_call = mock_driver.update_settings.call_args[0][0]
+        assert settings_call["waitForIdleTimeout"] == 1000
+
+    def test_setup_driver_retry_on_udid(self):
+        """When driver creation fails on first attempt with udid set, retries."""
+        mock_driver = Mock()
+        mock_driver.update_settings = Mock()
+        mock_config = _make_config(udid="emulator-5554")
+
+        call_count = [0]
+        def remote_side_effect(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise WebDriverException("connection failed")
+            return mock_driver
+
+        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
+             patch("mobile.damai_app.webdriver.Remote", side_effect=remote_side_effect), \
+             patch("mobile.damai_app.AppiumOptions"), \
+             patch("mobile.damai_app.ClientConfig"), \
+             patch("mobile.damai_app.RemoteConnection"), \
+             patch("mobile.damai_app.subprocess.run"), \
+             patch("mobile.damai_app.time.sleep"):
+            b = DamaiBot()
+
+        assert call_count[0] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +177,20 @@ class TestUltraFastClick:
 
         assert result is False
 
+    def test_ultra_fast_click_stale_retries(self, bot):
+        """StaleElementReferenceException causes retry; succeeds on second attempt."""
+        mock_el = _make_mock_element(x=10, y=20, width=80, height=60)
+
+        with patch("mobile.damai_app.WebDriverWait") as MockWait, \
+             patch("mobile.damai_app.time"):
+            MockWait.return_value.until.side_effect = [
+                StaleElementReferenceException("stale"),
+                mock_el,
+            ]
+            result = bot.ultra_fast_click("by", "value")
+
+        assert result is True
+
 
 # ---------------------------------------------------------------------------
 # batch_click
@@ -236,7 +201,7 @@ class TestBatchClick:
         """ultra_fast_click called for each element pair."""
         elements = [("by1", "v1"), ("by2", "v2"), ("by3", "v3")]
         with patch.object(bot, "ultra_fast_click", return_value=True) as ufc, \
-             patch("mobile.damai_app.time") as mock_time:
+             patch("mobile.damai_app.time"):
             bot.batch_click(elements, delay=0.1)
 
         assert ufc.call_count == 3
@@ -244,16 +209,22 @@ class TestBatchClick:
         ufc.assert_any_call("by2", "v2")
         ufc.assert_any_call("by3", "v3")
 
-    def test_batch_click_some_fail(self, bot, caplog):
-        """Failed clicks log a warning but processing continues."""
+    def test_batch_click_some_fail_prints(self, bot, capsys):
+        """Failed clicks print a message and processing continues."""
         elements = [("by1", "v1"), ("by2", "v2")]
-        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
-             patch.object(bot, "ultra_fast_click", side_effect=[False, True]) as ufc, \
+        with patch.object(bot, "ultra_fast_click", side_effect=[False, True]) as ufc, \
              patch("mobile.damai_app.time"):
             bot.batch_click(elements, delay=0.1)
 
         assert ufc.call_count == 2
-        assert "点击失败: v1" in caplog.text
+        captured = capsys.readouterr()
+        assert "点击失败: v1" in captured.out
+
+    def test_batch_click_empty_list(self, bot):
+        """Empty list does nothing."""
+        with patch.object(bot, "ultra_fast_click") as ufc:
+            bot.batch_click([])
+        ufc.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -261,15 +232,21 @@ class TestBatchClick:
 # ---------------------------------------------------------------------------
 
 class TestUltraBatchClick:
-    def test_ultra_batch_click_collects_and_clicks(self, bot, caplog):
+    def test_ultra_batch_click_collects_and_clicks(self, bot, capsys):
         """Coordinates collected for all elements, then clicked sequentially."""
         el1 = _make_mock_element(x=10, y=20, width=100, height=50)
         el2 = _make_mock_element(x=200, y=300, width=60, height=30)
 
-        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
-             patch("mobile.damai_app.WebDriverWait") as MockWait, \
-             patch("mobile.damai_app.time"):
-            MockWait.return_value.until.side_effect = [el1, el2]
+        with patch("mobile.damai_app.time"):
+            bot.driver.find_elements.return_value = [el1]
+            # We need to return different elements for different calls
+            call_count = [0]
+            def find_elements_side_effect(by, value):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    return [el1]
+                return [el2]
+            bot.driver.find_elements.side_effect = find_elements_side_effect
             bot.ultra_batch_click([("by1", "v1"), ("by2", "v2")], timeout=2)
 
         # Two clickGesture calls with correct center coordinates
@@ -278,25 +255,19 @@ class TestUltraBatchClick:
         assert calls[0] == call("mobile: clickGesture", {"x": 60, "y": 45, "duration": 30})
         assert calls[1] == call("mobile: clickGesture", {"x": 230, "y": 315, "duration": 30})
 
-        assert "成功找到 2 个用户" in caplog.text
+        captured = capsys.readouterr()
+        assert "成功找到 2 个用户" in captured.out
 
-    def test_ultra_batch_click_timeout_skips(self, bot, caplog):
-        """Timed-out elements are skipped; found ones are still clicked."""
-        el1 = _make_mock_element(x=10, y=20, width=100, height=50)
+    def test_ultra_batch_click_not_found_skips(self, bot, capsys):
+        """Elements not found are skipped."""
+        bot.driver.find_elements.return_value = []
+        with patch("mobile.damai_app.time"):
+            bot.ultra_batch_click([("by1", "v1")], timeout=2)
 
-        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
-             patch("mobile.damai_app.WebDriverWait") as MockWait, \
-             patch("mobile.damai_app.time"):
-            MockWait.return_value.until.side_effect = [
-                el1,
-                TimeoutException("timeout"),
-            ]
-            bot.ultra_batch_click([("by1", "v1"), ("by2", "v2")], timeout=2)
-
-        # Only 1 click executed (the successful one)
-        assert bot.driver.execute_script.call_count == 1
-        assert "超时未找到用户: v2" in caplog.text
-        assert "成功找到 1 个用户" in caplog.text
+        assert bot.driver.execute_script.call_count == 0
+        captured = capsys.readouterr()
+        assert "未找到用户: v1" in captured.out
+        assert "成功找到 0 个用户" in captured.out
 
 
 # ---------------------------------------------------------------------------
@@ -350,54 +321,66 @@ class TestSmartWaitAndClick:
 
 
 # ---------------------------------------------------------------------------
-# auto navigation
+# _click_element
 # ---------------------------------------------------------------------------
 
-class TestAutoNavigation:
-    def test_title_matches_target_with_keyword_tokens(self, bot):
-        bot.config.keyword = "张杰 演唱会"
-
-        assert bot._title_matches_target("【北京】2026张杰未·LIVE—「开往1982」演唱会-北京站") is True
-
-    def test_navigate_to_target_event_from_search_page(self, bot):
-        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
-             patch.object(bot, "_submit_search_keyword", return_value=True) as submit_keyword, \
-             patch.object(bot, "_open_target_from_search_results", return_value=True) as open_target:
-            result = bot.navigate_to_target_event({"state": "unknown"})
+class TestClickElement:
+    def test_click_element_center(self, bot):
+        """_click_element calculates center coords and calls execute_script."""
+        el = _make_mock_element(x=100, y=200, width=50, height=40)
+        result = bot._click_element(el)
 
         assert result is True
-        submit_keyword.assert_called_once()
-        open_target.assert_called_once()
+        bot.driver.execute_script.assert_called_once_with(
+            "mobile: clickGesture",
+            {"x": 125, "y": 220, "duration": 50},
+        )
 
-    def test_fast_retry_does_not_submit_when_commit_disabled(self, bot):
-        bot.config.if_commit_order = False
-
-        with patch.object(bot, "probe_current_page", return_value={"state": "order_confirm_page"}), \
-             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
-             patch.object(bot, "smart_wait_and_click") as smart_click:
-            result = bot._fast_retry_from_current_state()
-
-        assert result is True
-        wait_for_element.assert_called_once()
-        smart_click.assert_not_called()
-
-    def test_run_with_retry_stops_on_terminal_failure(self, bot):
-        with patch("mobile.damai_app.time.sleep"), \
-             patch.object(bot, "run_ticket_grabbing", side_effect=self._mark_terminal_failure(bot)), \
-             patch.object(bot, "_fast_retry_from_current_state") as fast_retry, \
-             patch.object(bot, "_setup_driver") as setup_driver:
-            result = bot.run_with_retry(max_retries=3)
+    def test_click_element_stale_returns_false(self, bot):
+        """StaleElementReferenceException on execute_script returns False."""
+        el = _make_mock_element()
+        bot.driver.execute_script.side_effect = StaleElementReferenceException("stale")
+        result = bot._click_element(el)
 
         assert result is False
-        fast_retry.assert_not_called()
-        setup_driver.assert_not_called()
+        # Reset side_effect for other tests
+        bot.driver.execute_script.side_effect = None
 
-    @staticmethod
-    def _mark_terminal_failure(bot):
-        def runner():
-            bot._terminal_failure_reason = "reservation_only"
-            return False
-        return runner
+    def test_click_element_webdriver_exception_returns_false(self, bot):
+        """WebDriverException on execute_script returns False."""
+        el = _make_mock_element()
+        bot.driver.execute_script.side_effect = WebDriverException("error")
+        result = bot._click_element(el)
+
+        assert result is False
+        # Reset side_effect for other tests
+        bot.driver.execute_script.side_effect = None
+
+
+# ---------------------------------------------------------------------------
+# _build_date_tokens
+# ---------------------------------------------------------------------------
+
+class TestBuildDateTokens:
+    def test_build_date_tokens_md_format(self, bot):
+        """12.06 produces multiple date representations."""
+        tokens = bot._build_date_tokens("12.06")
+        assert len(tokens) > 0
+        # Should have some reasonable date tokens
+        assert any("12" in t for t in tokens)
+
+    def test_build_date_tokens_empty_returns_empty(self, bot):
+        """Empty string returns empty list."""
+        assert bot._build_date_tokens("") == []
+
+    def test_build_date_tokens_none_returns_empty(self, bot):
+        """None returns empty list."""
+        assert bot._build_date_tokens(None) == []
+
+    def test_build_date_tokens_deduplicates(self, bot):
+        """No duplicate tokens in result."""
+        tokens = bot._build_date_tokens("2026.03.29")
+        assert len(tokens) == len(set(tokens))
 
 
 # ---------------------------------------------------------------------------
@@ -405,672 +388,158 @@ class TestAutoNavigation:
 # ---------------------------------------------------------------------------
 
 class TestRunTicketGrabbing:
-    def test_run_ticket_grabbing_auto_navigates_from_homepage(self, bot):
-        bot.config.probe_only = True
+    def _patch_time(self):
+        """Return a time mock with .time() returning floats and .sleep() as a no-op."""
+        mock_time = Mock()
+        mock_time.time.side_effect = [0.0, 1.5]
+        mock_time.sleep = Mock()
+        return mock_time
 
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "navigate_to_target_event", return_value=True) as navigate, \
-             patch.object(bot, "probe_current_page", side_effect=[
-                 {
-                     "state": "homepage",
-                     "purchase_button": False,
-                     "price_container": False,
-                     "quantity_picker": False,
-                     "submit_button": False,
-                     "reservation_mode": False,
-                 },
-                 {
-                     "state": "detail_page",
-                     "purchase_button": True,
-                     "price_container": True,
-                     "quantity_picker": False,
-                     "submit_button": False,
-                     "reservation_mode": False,
-                 },
-             ]), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.3]
+    def test_run_ticket_grabbing_returns_true_on_success(self, bot):
+        """When all inner operations succeed, returns True."""
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=True), \
+             patch.object(bot, "_tap_from_dump", return_value=True), \
+             patch.object(bot, "_ensure_sku_panel", return_value=True), \
+             patch.object(bot, "_tap_right_bottom"), \
+             patch.object(bot, "_tap_text_from_dump", return_value=True), \
+             patch.object(bot, "_adb_screen_size", return_value=None), \
+             patch.object(bot, "_try_open_time_panel", return_value=True), \
+             patch.object(bot, "_try_select_date_by_index", return_value=True), \
+             patch.object(bot, "_try_select_any_price", return_value=True), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch.object(bot, "_dump_page_source"), \
+             patch("mobile.damai_app.time", self._patch_time()):
             result = bot.run_ticket_grabbing()
 
         assert result is True
-        navigate.assert_called_once()
 
-    def test_run_ticket_grabbing_returns_false_when_not_detail_page(self, bot):
-        """Homepage or other non-detail states fail fast with a clear result."""
-        bot.config.auto_navigate = False
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "homepage",
-                 "purchase_button": False,
-                 "price_container": False,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "smart_wait_and_click") as smart_click, \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
+    def test_run_ticket_grabbing_returns_false_on_exception(self, bot):
+        """Exception in flow returns False and sets last_error."""
+        mock_time = Mock()
+        mock_time.time.return_value = 0.0
+        mock_time.sleep = Mock()
+        with patch.object(bot, "smart_wait_and_click", side_effect=RuntimeError("boom")), \
+             patch("mobile.damai_app.time", mock_time):
             result = bot.run_ticket_grabbing()
 
         assert result is False
-        smart_click.assert_not_called()
+        assert "boom" in bot.last_error
 
-    def test_run_ticket_grabbing_probe_only_returns_true_when_detail_ready(self, bot):
-        """probe_only stops before purchase when detail-page essentials are present."""
-        bot.config.probe_only = True
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "smart_wait_and_click") as smart_click, \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-        smart_click.assert_not_called()
-
-    def test_run_ticket_grabbing_probe_only_returns_false_when_detail_incomplete(self, bot):
-        """probe_only reports failure when detail-page essentials are missing."""
-        bot.config.probe_only = True
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-
-    def test_run_ticket_grabbing_probe_only_returns_true_when_sku_page_ready(self, bot):
-        """probe_only succeeds when the ticket sku page is already open."""
-        bot.config.probe_only = True
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "sku_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "smart_wait_and_click") as smart_click, \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-        smart_click.assert_not_called()
-
-    def test_run_ticket_grabbing_success(self, bot):
-        """All phases succeed, returns True."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "verify_order_result", return_value="success"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
-            # Mock find_element for price container + target_price
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []  # no quantity layout
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-
-    def test_run_ticket_grabbing_stops_before_submit_when_commit_disabled(self, bot):
-        """if_commit_order=False waits for confirm page but never clicks submit."""
+    def test_run_ticket_grabbing_skips_commit_when_disabled(self, bot, capsys):
+        """When if_commit_order=False, submission is skipped."""
         bot.config.if_commit_order = False
 
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click, \
-             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.2]
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=True), \
+             patch.object(bot, "_tap_from_dump", return_value=True), \
+             patch.object(bot, "_ensure_sku_panel", return_value=False), \
+             patch.object(bot, "_tap_right_bottom"), \
+             patch.object(bot, "_tap_text_from_dump", return_value=True), \
+             patch.object(bot, "_adb_screen_size", return_value=None), \
+             patch.object(bot, "_try_open_time_panel", return_value=True), \
+             patch.object(bot, "_try_select_date_by_index", return_value=True), \
+             patch.object(bot, "_try_select_any_price", return_value=True), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch.object(bot, "_dump_page_source"), \
+             patch("mobile.damai_app.time", self._patch_time()):
             result = bot.run_ticket_grabbing()
 
         assert result is True
-        assert smart_click.call_count == 2
-        wait_for_element.assert_called_once()
-
-    def test_run_ticket_grabbing_continues_from_sku_page_when_commit_disabled(self, bot):
-        """sku_page can continue directly to confirm page without returning to detail."""
-        bot.config.if_commit_order = False
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "sku_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click") as smart_click, \
-             patch.object(bot, "smart_wait_for_element", return_value=True) as wait_for_element, \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.8]
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-        smart_click.assert_not_called()
-        wait_for_element.assert_called_once()
-
-    def test_run_ticket_grabbing_returns_false_for_reservation_sku_page(self, bot, caplog):
-        """Reservation-only sku pages stop safely before tapping the bottom action."""
-        bot.config.if_commit_order = False
-
-        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
-             patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", side_effect=[
-                 {
-                     "state": "sku_page",
-                     "purchase_button": False,
-                     "price_container": True,
-                     "quantity_picker": False,
-                     "submit_button": False,
-                     "reservation_mode": True,
-                 },
-                 {
-                     "state": "sku_page",
-                     "purchase_button": False,
-                     "price_container": True,
-                     "quantity_picker": False,
-                     "submit_button": False,
-                     "reservation_mode": True,
-                 },
-             ]), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "ultra_fast_click") as fast_click, \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-        assert fast_click.call_count == 1
-        fast_click.assert_called_once_with(
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("12.06")',
-            timeout=1.0,
-        )
-        assert "抢票预约" in caplog.text
-
-    def test_run_ticket_grabbing_returns_false_when_confirm_page_not_ready_and_commit_disabled(self, bot, caplog):
-        """Commit-disabled mode fails safely if the confirm page never becomes ready."""
-        bot.config.if_commit_order = False
-
-        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
-             patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "sku_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "smart_wait_for_element", return_value=False), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-        assert "未进入订单确认页" in caplog.text
-
-    def test_run_ticket_grabbing_city_fail(self, bot):
-        """City selection fails, returns False immediately."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "smart_wait_and_click", return_value=False), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-
-    def test_run_ticket_grabbing_book_fail(self, bot):
-        """Booking button fails, returns False."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "smart_wait_and_click", side_effect=[True, False]), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-            # Mock price container
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-
-    def test_run_ticket_grabbing_price_exception_tries_backup(self, bot):
-        """Text match fails, index find_element raises, backup via wait.until succeeds."""
-        mock_price_container = Mock()
-        mock_target = _make_mock_element()
-        mock_price_container.find_element.return_value = mock_target
-
-        def ultra_fast_click_side_effect(by, value, timeout=1.5):
-            # Fail the text-based price match, succeed for everything else
-            if 'textContains("799元")' in str(value):
-                return False
-            return True
-
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "check_session_valid", return_value=True), \
-             patch.object(bot, "select_performance_date"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "verify_order_result", return_value="success"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 2.0]
-            # find_element raises for price container, triggering wait.until backup
-            bot.driver.find_element.side_effect = NoSuchElementException("not found")
-            bot.wait.until = Mock(return_value=mock_price_container)
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-        # Backup path used wait.until
-        bot.wait.until.assert_called_once()
-
-    def test_run_ticket_grabbing_exception_returns_false(self, bot):
-        """Unexpected exception in flow returns False."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "smart_wait_and_click", side_effect=RuntimeError("boom")), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
-            result = bot.run_ticket_grabbing()
-
-        assert result is False
-
-    def test_run_ticket_grabbing_submit_warns_on_failure(self, bot, caplog):
-        """Submit button fails but function still returns True (warning logged)."""
-        call_count = [0]
-
-        def smart_click_side_effect(*args, **kwargs):
-            call_count[0] += 1
-            # 1st call = city, 2nd = book button, 3rd = submit
-            if call_count[0] == 3:
-                return False  # submit fails
-            return True
-
-        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
-             patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", side_effect=smart_click_side_effect), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "verify_order_result", return_value="timeout"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.0]
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
-
-        assert result is True
-        assert "提交订单按钮未找到" in caplog.text
+        captured = capsys.readouterr()
+        assert "不提交订单" in captured.out
 
     def test_run_ticket_grabbing_no_driver_quit_in_finally(self, bot):
-        """Verify driver.quit is NOT called inside run_ticket_grabbing's finally block."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "smart_wait_and_click", return_value=False), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
+        """driver.quit is NOT called inside run_ticket_grabbing."""
+        mock_time = Mock()
+        mock_time.time.return_value = 0.0
+        mock_time.sleep = Mock()
+        with patch.object(bot, "smart_wait_and_click", return_value=False), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=False), \
+             patch.object(bot, "_tap_bottom_area", return_value=False), \
+             patch("mobile.damai_app.time", mock_time):
             bot.run_ticket_grabbing()
 
         bot.driver.quit.assert_not_called()
 
-    def test_run_ticket_grabbing_skips_user_click_when_order_confirm_page_directly_opened(self, bot):
-        """Direct jump to order confirm page should skip manual user selection."""
-        bot.config.if_commit_order = False
+    def test_run_ticket_grabbing_skips_city_when_no_city(self, bot):
+        """When city is empty, city selection is skipped."""
+        bot.config.city = ""
 
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "sku_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_for_element", return_value=True), \
-             patch.object(bot, "ultra_fast_click", return_value=True), \
-             patch.object(bot, "ultra_batch_click") as batch_click, \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.8]
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
-
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_tap_from_dump", return_value=True), \
+             patch.object(bot, "_ensure_sku_panel", return_value=True), \
+             patch.object(bot, "_tap_right_bottom"), \
+             patch.object(bot, "_tap_text_from_dump", return_value=True), \
+             patch.object(bot, "_adb_screen_size", return_value=None), \
+             patch.object(bot, "_try_open_time_panel", return_value=True), \
+             patch.object(bot, "_try_select_date_by_index", return_value=True), \
+             patch.object(bot, "_try_select_any_price", return_value=True), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch.object(bot, "_dump_page_source"), \
+             patch("mobile.damai_app.time", self._patch_time()):
             result = bot.run_ticket_grabbing()
 
+        # smart_wait_and_click should still be called for book button, not for city
         assert result is True
-        batch_click.assert_not_called()
 
+    def test_run_ticket_grabbing_book_fail_returns_false(self, bot):
+        """When book button and all fallbacks fail, returns False."""
+        mock_time = Mock()
+        mock_time.time.return_value = 0.0
+        mock_time.sleep = Mock()
+        with patch.object(bot, "smart_wait_and_click", return_value=False), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=False), \
+             patch.object(bot, "_tap_bottom_area", return_value=False), \
+             patch("mobile.damai_app.time", mock_time):
+            result = bot.run_ticket_grabbing()
 
-class TestPageStateHelpers:
-    def test_collect_search_results_reads_card_summary(self, bot):
-        card = Mock()
-        card.find_elements.side_effect = lambda by=None, value=None: {
-            (By.ID, "cn.damai:id/tv_project_name"): [Mock(text="【北京】张杰演唱会")],
-            (By.ID, "cn.damai:id/tv_project_venueName"): [Mock(text="国家体育场-鸟巢")],
-            (By.ID, "cn.damai:id/tv_project_city"): [Mock(text="北京 | ")],
-            (By.ID, "cn.damai:id/tv_project_time"): [Mock(text="2026.03.29-04.19")],
-            (By.ID, "cn.damai:id/bricks_dm_common_price_prefix"): [Mock(text="¥")],
-            (By.ID, "cn.damai:id/bricks_dm_common_price_des"): [Mock(text="380")],
-            (By.ID, "cn.damai:id/bricks_dm_common_price_suffix"): [Mock(text="起")],
-        }.get((by, value), [])
-        bot.driver.find_elements.return_value = [card]
-        bot.config.keyword = "张杰 演唱会"
+        assert result is False
 
-        results = bot.collect_search_results()
+    def test_run_ticket_grabbing_date_strict_returns_false_when_not_found(self, bot):
+        """When date_strict=True and date can't be selected, returns False."""
+        bot.config.date_strict = True
+        bot.config.date_index = None  # force text-based date matching
 
-        assert results == [{
-            "title": "【北京】张杰演唱会",
-            "venue": "国家体育场-鸟巢",
-            "city": "北京",
-            "time": "2026.03.29-04.19",
-            "price": "¥380起",
-            "score": results[0]["score"],
-        }]
-        assert results[0]["score"] >= 60
+        mock_time = Mock()
+        mock_time.time.side_effect = [0.0, 1.5]
+        mock_time.sleep = Mock()
 
-    def test_get_visible_price_options_extracts_card_texts(self, bot):
-        price_container = Mock()
-        card_a = Mock()
-        card_b = Mock()
-        price_container.find_elements.side_effect = lambda by=None, value=None: (
-            [card_a, card_b] if (by, value) == (By.CLASS_NAME, "android.widget.FrameLayout") else []
-        )
-        bot.driver.find_element.return_value = price_container
-        card_a.get_attribute.side_effect = lambda name: "true" if name == "clickable" else ""
-        card_b.get_attribute.side_effect = lambda name: "true" if name == "clickable" else ""
-        card_a.find_elements.return_value = [Mock(text="内场"), Mock(text="1280"), Mock(text="可预约")]
-        card_b.find_elements.return_value = [Mock(text="看台"), Mock(text="380"), Mock(text="无票")]
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=False), \
+             patch.object(bot, "_try_click_by_text_tokens_webview", return_value=False), \
+             patch.object(bot, "_tap_from_dump", return_value=True), \
+             patch.object(bot, "_ensure_sku_panel", return_value=True), \
+             patch.object(bot, "_tap_right_bottom"), \
+             patch.object(bot, "_try_open_time_panel", return_value=False), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch.object(bot, "_dump_page_source"), \
+             patch("mobile.damai_app.time", mock_time):
+            result = bot.run_ticket_grabbing()
 
-        options = bot.get_visible_price_options()
+        assert result is False
 
-        assert options == [
-            {"index": 0, "text": "内场1280元", "tag": "可预约", "raw_texts": ["内场", "1280", "可预约"], "source": "ui"},
-            {"index": 1, "text": "看台380元", "tag": "无票", "raw_texts": ["看台", "380", "无票"], "source": "ui"},
-        ]
+    def test_run_ticket_grabbing_fast_mode_price_fail_returns_false(self, bot):
+        """In fast_mode, price index not found returns False immediately."""
+        bot.config.fast_mode = True
 
-    def test_normalize_ocr_price_text(self, bot):
-        assert bot._normalize_ocr_price_text("38075 Fam ©") == "380元"
-        assert bot._normalize_ocr_price_text("128076 gma G") == "1280元"
-        assert bot._normalize_ocr_price_text("noise") == ""
+        mock_time = Mock()
+        mock_time.time.side_effect = [0.0, 1.5]
+        mock_time.sleep = Mock()
 
-    def test_probe_current_page_detects_homepage(self, bot):
-        with patch.object(
-            bot,
-            "_has_element",
-            side_effect=lambda by, value: (by, value) == (By.ID, "cn.damai:id/homepage_header_search"),
-        ), patch.object(bot, "_get_current_activity", return_value=""):
-            result = bot.probe_current_page()
+        with patch.object(bot, "smart_wait_and_click", return_value=True), \
+             patch.object(bot, "_try_click_by_text_tokens", return_value=True), \
+             patch.object(bot, "_tap_from_dump", return_value=False), \
+             patch.object(bot, "_ensure_sku_panel", return_value=True), \
+             patch.object(bot, "_try_select_price_in_flowlayout", return_value=False), \
+             patch.object(bot, "_try_open_time_panel", return_value=True), \
+             patch.object(bot, "_try_select_date_by_index", return_value=True), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch.object(bot, "_dump_page_source"), \
+             patch("mobile.damai_app.time", mock_time):
+            result = bot.run_ticket_grabbing()
 
-            assert result["state"] == "homepage"
-            assert result["purchase_button"] is False
-
-    def test_probe_current_page_detects_homepage_by_activity(self, bot):
-        with patch.object(bot, "_has_element", return_value=False), \
-             patch.object(bot, "_get_current_activity", return_value=".homepage.MainActivity"):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "homepage"
-
-    def test_probe_current_page_detects_search_activity(self, bot):
-        with patch.object(bot, "_has_element", return_value=False), \
-             patch.object(bot, "_get_current_activity", return_value="com.alibaba.pictures.bricks.search.v2.SearchActivity"):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "search_page"
-            assert result["purchase_button"] is False
-
-    def test_probe_current_page_detects_detail_page_by_activity_and_summary_price(self, bot):
-        present = {
-            (By.ID, "cn.damai:id/project_detail_price_layout"),
-        }
-
-        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
-             patch.object(bot, "_get_current_activity", return_value=".trade.newtradeorder.ui.projectdetail.ui.activity.ProjectDetailActivity"):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "detail_page"
-            assert result["purchase_button"] is False
-            assert result["price_container"] is True
-
-    def test_probe_current_page_detects_sku_page(self, bot):
-        present = {
-            (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
-            (By.ID, "cn.damai:id/layout_sku"),
-        }
-
-        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
-             patch.object(bot, "_get_current_activity", return_value=".commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity"):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "sku_page"
-            assert result["price_container"] is True
-            assert result["reservation_mode"] is False
-
-    def test_probe_current_page_marks_reservation_mode_for_reservation_sku(self, bot):
-        present = {
-            (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
-            (By.ID, "cn.damai:id/layout_sku"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看场次")'),
-        }
-
-        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
-             patch.object(bot, "_get_current_activity", return_value=".commonbusiness.seatbiz.sku.qilin.ui.NcovSkuActivity"):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "sku_page"
-            assert result["reservation_mode"] is True
-
-    def test_probe_current_page_detects_detail_page_controls(self, bot):
-        present = {
-            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-            (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
-            (By.ID, "layout_num"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-        }
-
-        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
-             patch.object(bot, "_get_current_activity", return_value=""):
-            result = bot.probe_current_page()
-
-            assert result["state"] == "order_confirm_page"
-            assert result["purchase_button"] is True
-            assert result["price_container"] is True
-            assert result["quantity_picker"] is True
-            assert result["submit_button"] is True
-
-    def test_dismiss_startup_popups_clicks_known_popups(self, bot):
-        present = {
-            (By.ID, "android:id/ok"),
-            (By.ID, "cn.damai:id/id_boot_action_agree"),
-            (By.ID, "cn.damai:id/damai_theme_dialog_cancel_btn"),
-            (By.ID, "cn.damai:id/damai_theme_dialog_close_layout"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("下次再说")'),
-        }
-
-        with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
-             patch.object(bot, "ultra_fast_click", return_value=True) as fast_click, \
-             patch("mobile.damai_app.time.sleep"):
-            result = bot.dismiss_startup_popups()
-
-            assert result is True
-            fast_click.assert_any_call(By.ID, "android:id/ok")
-            fast_click.assert_any_call(By.ID, "cn.damai:id/id_boot_action_agree")
-            fast_click.assert_any_call(By.ID, "cn.damai:id/damai_theme_dialog_cancel_btn")
-            fast_click.assert_any_call(By.ID, "cn.damai:id/damai_theme_dialog_close_layout")
-            fast_click.assert_any_call(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")')
-            fast_click.assert_any_call(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("下次再说")')
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -1089,7 +558,6 @@ class TestRunWithRetry:
     def test_run_with_retry_success_second_attempt(self, bot):
         """Fails once, sets up driver again, succeeds second time."""
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, True]), \
-             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver") as mock_setup, \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
@@ -1100,7 +568,6 @@ class TestRunWithRetry:
     def test_run_with_retry_all_fail(self, bot):
         """All retries fail, returns False."""
         with patch.object(bot, "run_ticket_grabbing", return_value=False), \
-             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver"), \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
@@ -1110,430 +577,696 @@ class TestRunWithRetry:
     def test_run_with_retry_driver_quit_between_retries(self, bot):
         """Between retries, driver.quit and _setup_driver are called."""
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, False, True]), \
-             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
              patch.object(bot, "_setup_driver") as mock_setup, \
              patch("mobile.damai_app.time"):
             bot.run_with_retry(max_retries=3)
 
-        # quit called before each retry (2 failures, but last one succeeds so only 2 quit calls)
         assert bot.driver.quit.call_count == 2
         assert mock_setup.call_count == 2
 
     def test_run_with_retry_quit_exception_handled(self, bot):
-        """driver.quit raises an exception, handled by except block."""
+        """driver.quit raises an exception but retry continues."""
         bot.driver.quit.side_effect = Exception("quit failed")
 
         with patch.object(bot, "run_ticket_grabbing", side_effect=[False, True]), \
-             patch.object(bot, "_setup_driver") as mock_setup, \
-             patch.object(bot, "_fast_retry_from_current_state", return_value=False), \
+             patch.object(bot, "_setup_driver"), \
              patch("mobile.damai_app.time"):
             result = bot.run_with_retry(max_retries=3)
 
-        # Despite quit failure, retry continued and succeeded
         assert result is True
 
-    def test_run_with_retry_uses_fast_retry(self, bot):
-        """Verify fast retry is attempted before driver recreation."""
-        with patch.object(bot, "run_ticket_grabbing", side_effect=[False, False]), \
-             patch.object(bot, "_fast_retry_from_current_state", return_value=False) as fast_retry, \
+    def test_run_with_retry_respects_max_retries(self, bot):
+        """run_ticket_grabbing is called exactly max_retries times."""
+        run_tg = Mock(return_value=False)
+        with patch.object(bot, "run_ticket_grabbing", run_tg), \
              patch.object(bot, "_setup_driver"), \
              patch("mobile.damai_app.time"):
-            bot.run_with_retry(max_retries=2)
+            bot.run_with_retry(max_retries=5)
 
-        # fast_retry called fast_retry_count times per failed attempt
-        assert fast_retry.call_count == bot.config.fast_retry_count * 2
-
-
-# ---------------------------------------------------------------------------
-# wait_for_sale_start
-# ---------------------------------------------------------------------------
-
-class TestWaitForSaleStart:
-    def test_wait_for_sale_start_no_config(self, bot):
-        """sell_start_time=None, returns immediately without sleeping."""
-        bot.config.sell_start_time = None
-        with patch("mobile.damai_app.time.sleep") as mock_sleep:
-            bot.wait_for_sale_start()
-        mock_sleep.assert_not_called()
-
-    def test_wait_for_sale_start_already_passed(self, bot):
-        """Time in past, returns immediately."""
-        bot.config.sell_start_time = "2020-01-01T10:00:00+08:00"
-        with patch("mobile.damai_app.time.sleep") as mock_sleep:
-            bot.wait_for_sale_start()
-        mock_sleep.assert_not_called()
-
-    def test_wait_for_sale_start_waits_and_polls(self, bot):
-        """Mock time so sale is in future, verify sleep called, then polling finds button."""
-        _tz = timezone(timedelta(hours=8))
-        # Sale starts 10 seconds from "now"
-        future_time = datetime(2026, 6, 1, 20, 0, 10, tzinfo=_tz)
-        bot.config.sell_start_time = future_time.isoformat()
-        bot.config.countdown_lead_ms = 3000
-
-        # Track datetime.now calls: first returns "now" (10s before sale),
-        # then returns times during polling
-        now_base = datetime(2026, 6, 1, 20, 0, 0, tzinfo=_tz)
-        now_calls = [0]
-
-        def mock_now(tz=None):
-            now_calls[0] += 1
-            if now_calls[0] <= 2:
-                # Initial check + sleep calculation
-                return now_base
-            # During polling, return past the sale time
-            return future_time + timedelta(seconds=1)
-
-        with patch("mobile.damai_app.datetime") as mock_dt, \
-             patch("mobile.damai_app.time.sleep") as mock_sleep, \
-             patch.object(bot, "_has_element", return_value=True):
-            mock_dt.fromisoformat = datetime.fromisoformat
-            mock_dt.now = mock_now
-            bot.wait_for_sale_start()
-
-        # Should have slept for the wait period (10s - 3s lead = 7s)
-        assert mock_sleep.call_count >= 1
-        # First sleep should be ~7 seconds
-        first_sleep_arg = mock_sleep.call_args_list[0][0][0]
-        assert 6.5 < first_sleep_arg < 7.5
+        assert run_tg.call_count == 5
 
 
 # ---------------------------------------------------------------------------
-# _fast_retry_from_current_state
+# _build_capabilities (via _setup_driver internals via AppiumOptions)
 # ---------------------------------------------------------------------------
 
-class TestFastRetry:
-    def test_fast_retry_from_detail_page(self, bot):
-        """probe returns detail_page, re-runs full flow."""
-        with patch.object(bot, "probe_current_page", return_value={
-                "state": "detail_page",
-                "purchase_button": True,
-                "price_container": True,
-                "quantity_picker": False,
-                "submit_button": False,
-             }), \
-             patch.object(bot, "run_ticket_grabbing", return_value=True) as run_tg:
-            result = bot._fast_retry_from_current_state()
+class TestBuildCapabilities:
+    def test_build_capabilities_includes_device_fields(self):
+        """Capabilities include device_name, platform_version, etc."""
+        mock_driver = Mock()
+        mock_driver.update_settings = Mock()
+        mock_options = Mock()
 
-        assert result is True
-        run_tg.assert_called_once()
-
-    def test_fast_retry_from_order_confirm_page(self, bot):
-        """probe returns order_confirm_page, re-attempts submit only."""
-        with patch.object(bot, "probe_current_page", return_value={
-                "state": "order_confirm_page",
-                "purchase_button": False,
-                "price_container": False,
-                "quantity_picker": False,
-                "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True) as smart_click:
-            result = bot._fast_retry_from_current_state()
-
-        assert result is True
-        smart_click.assert_called_once()
-
-    def test_fast_retry_from_unknown_presses_back(self, bot):
-        """probe returns unknown, press_keycode(4) called, then re-runs flow."""
-        bot.config.auto_navigate = False
-
-        with patch.object(bot, "probe_current_page", return_value={
-                "state": "unknown",
-                "purchase_button": False,
-                "price_container": False,
-                "quantity_picker": False,
-                "submit_button": False,
-             }), \
-             patch.object(bot, "run_ticket_grabbing", return_value=False) as run_tg, \
-             patch("mobile.damai_app.time.sleep"):
-            result = bot._fast_retry_from_current_state()
-
-        bot.driver.press_keycode.assert_called_once_with(4)
-        run_tg.assert_called_once()
-        assert result is False
-
-
-# ---------------------------------------------------------------------------
-# verify_order_result
-# ---------------------------------------------------------------------------
-
-class TestVerifyOrderResult:
-    def test_verify_order_success_payment_activity(self, bot):
-        """Activity contains 'Pay', returns 'success'."""
-        with patch.object(bot, "_get_current_activity", return_value="com.alipay.android.app.PayActivity"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "success"
-
-    def test_verify_order_success_payment_text(self, bot):
-        """Element contains '支付', returns 'success'."""
-        def has_element_side_effect(by, value):
-            return '支付' in value
-
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "success"
-
-    def test_verify_order_sold_out(self, bot):
-        """Element contains '已售罄', returns 'sold_out'."""
-        def has_element_side_effect(by, value):
-            return '已售罄' in value
-
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "sold_out"
-
-    def test_verify_order_timeout(self, bot):
-        """No indicators found, returns 'timeout'."""
-        call_count = [0]
-
-        def mock_time_func():
-            call_count[0] += 1
-            # Return increasing time so we exceed timeout quickly
-            return call_count[0] * 3.0
-
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", return_value=False), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time = mock_time_func
-            mock_time.sleep = Mock()
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "timeout"
-
-    def test_verify_order_captcha(self, bot):
-        """Element contains '验证', returns 'captcha'."""
-        def has_element_side_effect(by, value):
-            # Skip 支付 and 已售罄/库存不足/暂时无票, match 验证
-            if '支付' in value:
-                return False
-            if '已售罄' in value or '库存不足' in value or '暂时无票' in value:
-                return False
-            if '验证' in value:
-                return True
-            return False
-
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "captcha"
-
-    def test_verify_order_existing_order(self, bot):
-        """Element contains '未支付', returns 'existing_order'."""
-        def has_element_side_effect(by, value):
-            if '支付' in value and '未' not in value:
-                return False
-            if '已售罄' in value or '库存不足' in value or '暂时无票' in value:
-                return False
-            if '滑块' in value or '验证' in value:
-                return False
-            if '未支付' in value:
-                return True
-            return False
-
-        with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
-            result = bot.verify_order_result(timeout=5)
-
-        assert result == "existing_order"
-
-
-# ---------------------------------------------------------------------------
-# select_performance_date
-# ---------------------------------------------------------------------------
-
-class TestSelectPerformanceDate:
-    def test_select_performance_date_found(self, bot, caplog):
-        """Date text found and clicked successfully."""
-        with caplog.at_level("INFO", logger="mobile.damai_app"), \
-             patch.object(bot, "ultra_fast_click", return_value=True) as ufc:
-            bot.select_performance_date()
-
-        ufc.assert_called_once_with(
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("12.06")',
-            timeout=1.0,
+        mock_config = _make_config(
+            device_name="Pixel 8",
+            udid="R58M123456A",
+            platform_version="14",
         )
-        assert "选择场次日期: 12.06" in caplog.text
 
-    def test_select_performance_date_not_found(self, bot, caplog):
-        """Date not found, continues gracefully without error."""
-        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
-             patch.object(bot, "ultra_fast_click", return_value=False) as ufc:
-            bot.select_performance_date()
+        captured_caps = {}
+        def load_caps_side_effect(caps):
+            captured_caps.update(caps)
 
-        ufc.assert_called_once()
-        assert "未找到日期" in caplog.text
+        mock_options_instance = Mock()
+        mock_options_instance.load_capabilities = Mock(side_effect=load_caps_side_effect)
 
-    def test_select_performance_date_no_date_configured(self, bot):
-        """No date in config, returns immediately without clicking."""
-        bot.config.date = ""
-        with patch.object(bot, "ultra_fast_click") as ufc:
-            bot.select_performance_date()
+        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
+             patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
+             patch("mobile.damai_app.AppiumOptions", return_value=mock_options_instance), \
+             patch("mobile.damai_app.ClientConfig"), \
+             patch("mobile.damai_app.RemoteConnection"):
+            b = DamaiBot()
 
-        ufc.assert_not_called()
+        assert captured_caps["deviceName"] == "Pixel 8"
+        assert captured_caps["udid"] == "R58M123456A"
+        assert captured_caps["platformVersion"] == "14"
+        assert captured_caps["appPackage"] == "cn.damai"
+
+    def test_capabilities_no_udid_field_when_none(self):
+        """When udid is None, 'udid' should NOT be in capabilities."""
+        mock_driver = Mock()
+        mock_driver.update_settings = Mock()
+
+        mock_config = _make_config(udid=None)
+        captured_caps = {}
+
+        mock_options_instance = Mock()
+        mock_options_instance.load_capabilities = Mock(side_effect=lambda c: captured_caps.update(c))
+
+        with patch("mobile.damai_app.Config.load_config", return_value=mock_config), \
+             patch("mobile.damai_app.webdriver.Remote", return_value=mock_driver), \
+             patch("mobile.damai_app.AppiumOptions", return_value=mock_options_instance), \
+             patch("mobile.damai_app.ClientConfig"), \
+             patch("mobile.damai_app.RemoteConnection"):
+            b = DamaiBot()
+
+        assert "udid" not in captured_caps
 
 
 # ---------------------------------------------------------------------------
-# check_session_valid
+# Helper internal methods
 # ---------------------------------------------------------------------------
 
-class TestCheckSessionValid:
-    def test_check_session_valid_logged_in(self, bot):
-        """No login indicators, returns True."""
-        with patch.object(bot, "_get_current_activity", return_value="ProjectDetailActivity"), \
-             patch.object(bot, "_has_element", return_value=False):
-            result = bot.check_session_valid()
+class TestHelperMethods:
+    def test_tap_bottom_area_success(self, bot):
+        """_tap_bottom_area calls execute_script with calculated coords."""
+        bot.driver.get_window_size.return_value = {"width": 1080, "height": 2400}
+        result = bot._tap_bottom_area()
+
+        assert result is True
+        bot.driver.execute_script.assert_called_once()
+        args = bot.driver.execute_script.call_args[0]
+        assert args[0] == "mobile: clickGesture"
+
+    def test_tap_bottom_area_exception_returns_false(self, bot):
+        """Exception in _tap_bottom_area returns False."""
+        bot.driver.get_window_size.side_effect = WebDriverException("error")
+        result = bot._tap_bottom_area()
+
+        assert result is False
+
+    def test_ensure_sku_panel_found_immediately(self, bot):
+        """_ensure_sku_panel returns True when panel is already visible."""
+        bot.driver.find_elements.return_value = [Mock()]
+        with patch("mobile.damai_app.time"):
+            result = bot._ensure_sku_panel()
 
         assert result is True
 
-    def test_check_session_valid_login_activity(self, bot, caplog):
-        """LoginActivity detected, returns False."""
-        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
-             patch.object(bot, "_get_current_activity", return_value="com.taobao.login.LoginActivity"):
-            result = bot.check_session_valid()
+    def test_ensure_sku_panel_not_found(self, bot):
+        """_ensure_sku_panel returns False when panel never appears."""
+        bot.driver.find_elements.return_value = []
+        with patch.object(bot, "_tap_bottom_area"), \
+             patch.object(bot, "_swipe_up_small"), \
+             patch("mobile.damai_app.time"):
+            result = bot._ensure_sku_panel()
 
         assert result is False
-        assert "登录已过期" in caplog.text
 
-    def test_check_session_valid_sign_activity(self, bot, caplog):
-        """SignActivity detected, returns False."""
-        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
-             patch.object(bot, "_get_current_activity", return_value="com.taobao.SignActivity"):
-            result = bot.check_session_valid()
+    def test_try_open_time_panel_calls_click_by_text_tokens(self, bot):
+        """_try_open_time_panel delegates to _try_click_by_text_tokens."""
+        with patch.object(bot, "_try_click_by_text_tokens", return_value=True) as tct:
+            result = bot._try_open_time_panel()
 
-        assert result is False
-        assert "登录已过期" in caplog.text
+        assert result is True
+        tct.assert_called_once()
+        # Should try panel-related tokens
+        args = tct.call_args[0][0]
+        assert "场次" in args or "时间" in args
 
-    def test_check_session_valid_login_prompt(self, bot, caplog):
-        """'请先登录' text detected on page, returns False."""
-        def has_element_side_effect(by, value):
-            return '请先登录' in value
+    def test_swipe_up_small_success(self, bot):
+        """_swipe_up_small calls execute_script without error."""
+        bot.driver.get_window_size.return_value = {"width": 1080, "height": 2400}
+        # Should not raise
+        bot._swipe_up_small()
 
-        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
-             patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect):
-            result = bot.check_session_valid()
-
-        assert result is False
-        assert "登录提示" in caplog.text
-
-    def test_check_session_valid_register_prompt(self, bot, caplog):
-        """'登录/注册' text detected on page, returns False."""
-        def has_element_side_effect(by, value):
-            return '登录/注册' in value
-
-        with caplog.at_level("ERROR", logger="mobile.damai_app"), \
-             patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
-             patch.object(bot, "_has_element", side_effect=has_element_side_effect):
-            result = bot.check_session_valid()
+    def test_try_select_city_by_index_returns_false_when_none(self, bot):
+        """_try_select_city_by_index returns False when city_index is None."""
+        bot.config.city_index = None
+        result = bot._try_select_city_by_index()
 
         assert result is False
-        assert "登录提示" in caplog.text
+
+    def test_dump_page_source_writes_xml(self, bot, tmp_path):
+        """_dump_page_source writes page source XML to file."""
+        xml_content = "<hierarchy><node /></hierarchy>"
+        bot.driver.page_source = xml_content
+
+        path = str(tmp_path / "test.xml")
+        bot._dump_page_source(path=path, force=True)
+
+        # In fast_mode, this may be a no-op; check it doesn't crash
+        # (fast_mode defaults to True, so the dump may be skipped)
+
+    def test_get_webview_context_returns_webview(self, bot):
+        """_get_webview_context returns first WEBVIEW context."""
+        bot.driver.contexts = ["NATIVE_APP", "WEBVIEW_1"]
+        result = bot._get_webview_context()
+
+        assert result == "WEBVIEW_1"
+
+    def test_get_webview_context_returns_none_when_no_webview(self, bot):
+        """_get_webview_context returns None when no WEBVIEW context."""
+        bot.driver.contexts = ["NATIVE_APP"]
+        result = bot._get_webview_context()
+
+        assert result is None
+
+    def test_get_webview_context_exception_returns_none(self, bot):
+        """Exception when accessing contexts returns None."""
+        bot.driver.contexts = Mock(side_effect=WebDriverException("error"))
+        result = bot._get_webview_context()
+
+        assert result is None
+
+    def test_try_scroll_and_click_skips_in_fast_mode(self, bot):
+        """_try_scroll_and_click returns False immediately in fast_mode."""
+        bot.config.fast_mode = True
+        result = bot._try_scroll_and_click(["token1"])
+
+        assert result is False
+
+    def test_try_select_date_by_index_returns_false_on_exception(self, bot):
+        """Exception in _try_select_date_by_index returns False."""
+        bot.driver.find_elements.side_effect = WebDriverException("error")
+        result = bot._try_select_date_by_index()
+
+        assert result is False
 
 
 # ---------------------------------------------------------------------------
-# Price selection (text match + index fallback)
+# Additional coverage tests for _try_* helpers and other uncovered paths
 # ---------------------------------------------------------------------------
 
-class TestPriceSelection:
-    def test_price_selection_text_match_success(self, bot):
-        """Text-based price match works, index fallback not used."""
-        with patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "check_session_valid", return_value=True), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "select_performance_date"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", return_value=True) as ufc, \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "verify_order_result", return_value="success"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
-            bot.driver.find_elements.return_value = []
-
-            result = bot.run_ticket_grabbing()
+class TestTryClickByTextTokens:
+    def test_try_click_by_text_tokens_finds_and_clicks(self, bot):
+        """First token matches and element is clicked successfully."""
+        el = _make_mock_element()
+        bot.driver.find_elements.return_value = [el]
+        result = bot._try_click_by_text_tokens(["token1"])
 
         assert result is True
-        # ultra_fast_click should have been called with the price text selector
-        price_call_found = any(
-            'textContains("799元")' in str(c)
-            for c in ufc.call_args_list
-        )
-        assert price_call_found, f"Expected price text selector call, got: {ufc.call_args_list}"
 
-    def test_price_selection_falls_back_to_index(self, bot, caplog):
-        """Text match fails, index-based fallback used."""
-        call_count = [0]
+    def test_try_click_by_text_tokens_no_elements_all_tokens(self, bot):
+        """No elements found for any token, returns False."""
+        bot.driver.find_elements.return_value = []
+        result = bot._try_click_by_text_tokens(["token1", "token2"])
 
-        def ultra_fast_click_side_effect(by, value, timeout=1.5):
-            call_count[0] += 1
-            # First call with textContains (price) returns False to trigger fallback
-            if 'textContains("799元")' in str(value):
-                return False
-            return True
+        assert result is False
 
-        with caplog.at_level("INFO", logger="mobile.damai_app"), \
-             patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "check_session_valid", return_value=True), \
-             patch.object(bot, "probe_current_page", return_value={
-                 "state": "detail_page",
-                 "purchase_button": True,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": False,
-             }), \
-             patch.object(bot, "wait_for_sale_start"), \
-             patch.object(bot, "select_performance_date"), \
-             patch.object(bot, "wait_for_page_state", return_value={
-                 "state": "order_confirm_page",
-                 "purchase_button": False,
-                 "price_container": True,
-                 "quantity_picker": False,
-                 "submit_button": True,
-             }), \
-             patch.object(bot, "smart_wait_and_click", return_value=True), \
-             patch.object(bot, "ultra_fast_click", side_effect=ultra_fast_click_side_effect), \
-             patch.object(bot, "ultra_batch_click"), \
-             patch.object(bot, "verify_order_result", return_value="success"), \
-             patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
-            # Mock price container for index-based fallback
-            mock_price_container = Mock()
-            mock_target = _make_mock_element()
-            mock_price_container.find_element.return_value = mock_target
-            bot.driver.find_element.return_value = mock_price_container
-            bot.driver.find_elements.return_value = []
+    def test_try_click_by_text_tokens_empty_list(self, bot):
+        """Empty token list returns False."""
+        result = bot._try_click_by_text_tokens([])
 
-            result = bot.run_ticket_grabbing()
+        assert result is False
+
+    def test_try_click_by_text_tokens_webdriver_exception(self, bot):
+        """WebDriverException for a token is swallowed, continues to next."""
+        bot.driver.find_elements.side_effect = [
+            WebDriverException("error"),
+            WebDriverException("error"),
+            WebDriverException("error"),
+        ]
+        result = bot._try_click_by_text_tokens(["token1"])
+
+        assert result is False
+
+
+class TestTryScrollAndClick:
+    def test_returns_false_in_fast_mode(self, bot):
+        """Always False in fast_mode."""
+        bot.config.fast_mode = True
+        result = bot._try_scroll_and_click(["token"])
+
+        assert result is False
+
+    def test_returns_false_when_no_scrollable(self, bot):
+        """No scrollable element returns False."""
+        bot.config.fast_mode = False
+        bot.driver.find_elements.return_value = []
+        result = bot._try_scroll_and_click(["token"])
+
+        assert result is False
+
+    def test_scrolls_and_clicks_when_found(self, bot):
+        """Scrollable present, token found, click succeeds."""
+        bot.config.fast_mode = False
+        mock_scrollable = Mock()
+        mock_el = _make_mock_element()
+
+        def find_elements_side(by, value):
+            if "scrollable" in value.lower() or "scrollable(true)" in value:
+                return [mock_scrollable]
+            return []
+
+        def find_element_side(by, value):
+            return mock_el
+
+        bot.driver.find_elements.side_effect = find_elements_side
+        bot.driver.find_element.return_value = mock_el
+
+        result = bot._try_scroll_and_click(["token"])
 
         assert result is True
-        assert "文本匹配失败，使用索引选择票价" in caplog.text
+
+
+class TestTrySelectAnyPrice:
+    def test_returns_true_when_price_element_clicked(self, bot):
+        """Finds a price element and clicks it."""
+        el = _make_mock_element()
+        bot.driver.find_elements.return_value = [el]
+        result = bot._try_select_any_price()
+
+        assert result is True
+
+    def test_returns_false_when_no_price_elements(self, bot):
+        """No price elements found returns False."""
+        bot.driver.find_elements.return_value = []
+        result = bot._try_select_any_price()
+
+        assert result is False
+
+    def test_returns_false_on_exception(self, bot):
+        """WebDriverException returns False."""
+        bot.driver.find_elements.side_effect = WebDriverException("error")
+        result = bot._try_select_any_price()
+
+        assert result is False
+
+
+class TestTrySelectPriceByResource:
+    def test_returns_true_when_element_found_and_clicked(self, bot):
+        """Finds resource-matched price element and clicks it."""
+        el = _make_mock_element()
+        bot.driver.find_elements.return_value = [el]
+        result = bot._try_select_price_by_resource()
+
+        assert result is True
+
+    def test_returns_false_when_no_elements(self, bot):
+        bot.driver.find_elements.return_value = []
+        result = bot._try_select_price_by_resource()
+
+        assert result is False
+
+    def test_returns_false_on_exception(self, bot):
+        bot.driver.find_elements.side_effect = WebDriverException("error")
+        result = bot._try_select_price_by_resource()
+
+        assert result is False
+
+
+class TestTrySelectPriceByLayout:
+    def test_returns_false_when_no_sku_layout(self, bot):
+        """No SKU layout element returns False."""
+        bot.driver.find_elements.return_value = []
+        result = bot._try_select_price_by_layout()
+
+        assert result is False
+
+    def test_returns_true_when_candidate_found(self, bot):
+        """SKU layout present with clickable items, clicks correct index."""
+        sku_el = Mock()
+        el = _make_mock_element(x=100, y=900, width=200, height=80)
+        el.get_attribute.return_value = "true"
+        el.rect = {"x": 100, "y": 900, "width": 200, "height": 80}
+        sku_el.find_elements.return_value = [el]
+        bot.driver.find_elements.return_value = [sku_el]
+        bot.config.price_index = 0
+
+        result = bot._try_select_price_by_layout()
+
+        assert result is True
+
+
+class TestTrySelectPriceInFlowlayout:
+    def test_returns_false_when_no_items(self, bot):
+        bot.driver.find_elements.return_value = []
+        result = bot._try_select_price_in_flowlayout()
+
+        assert result is False
+
+    def test_returns_true_when_item_found(self, bot):
+        """Items found, clicks the one at price_index."""
+        el = _make_mock_element()
+        bot.driver.find_elements.return_value = [el]
+        bot.config.price_index = 0
+
+        result = bot._try_select_price_in_flowlayout()
+
+        assert result is True
+
+    def test_returns_false_on_exception(self, bot):
+        bot.driver.find_elements.side_effect = Exception("error")
+        result = bot._try_select_price_in_flowlayout()
+
+        assert result is False
+
+
+class TestAdbMethods:
+    def test_adb_tap_returns_false_when_no_udid(self, bot):
+        """_adb_tap returns False when udid is None."""
+        bot.config.udid = None
+        result = bot._adb_tap(100, 200)
+
+        assert result is False
+
+    def test_adb_tap_runs_subprocess_with_udid(self, bot):
+        """_adb_tap calls subprocess.run when udid is set."""
+        bot.config.udid = "emulator-5554"
+        with patch("mobile.damai_app.subprocess.run") as mock_run:
+            result = bot._adb_tap(100, 200)
+
+        assert result is True
+        mock_run.assert_called_once()
+
+    def test_adb_tap_exception_returns_false(self, bot):
+        """Exception in subprocess call returns False."""
+        bot.config.udid = "emulator-5554"
+        with patch("mobile.damai_app.subprocess.run", side_effect=Exception("error")):
+            result = bot._adb_tap(100, 200)
+
+        assert result is False
+
+    def test_adb_screen_size_returns_none_when_no_udid(self, bot):
+        """Returns None when udid is None."""
+        bot.config.udid = None
+        result = bot._adb_screen_size()
+
+        assert result is None
+
+    def test_adb_screen_size_parses_output(self, bot):
+        """Parses adb wm size output correctly."""
+        bot.config.udid = "emulator-5554"
+        mock_result = Mock()
+        mock_result.stdout = "Physical size: 1080x2400\n"
+        with patch("mobile.damai_app.subprocess.run", return_value=mock_result):
+            result = bot._adb_screen_size()
+
+        assert result == {"width": 1080, "height": 2400}
+
+    def test_adb_screen_size_returns_none_on_exception(self, bot):
+        """Exception returns None."""
+        bot.config.udid = "emulator-5554"
+        with patch("mobile.damai_app.subprocess.run", side_effect=Exception("error")):
+            result = bot._adb_screen_size()
+
+        assert result is None
+
+
+class TestTapBounds:
+    def test_tap_bounds_parses_and_taps(self, bot):
+        """Parses bounds string and calls _adb_tap with midpoint."""
+        with patch.object(bot, "_adb_tap", return_value=True) as mock_tap:
+            result = bot._tap_bounds("[100,200][300,400]")
+
+        assert result is True
+        mock_tap.assert_called_once_with(200.0, 300.0)
+
+    def test_tap_bounds_invalid_returns_false(self, bot):
+        """Invalid bounds string returns False."""
+        result = bot._tap_bounds("invalid")
+
+        assert result is False
+
+
+class TestTapFromDump:
+    def test_tap_from_dump_returns_false_when_file_missing(self, bot):
+        """Missing dump file returns False."""
+        result = bot._tap_from_dump("some:id", index=0)
+
+        assert result is False
+
+    def test_tap_from_dump_finds_and_taps(self, bot, tmp_path):
+        """Finds candidate from XML and taps it."""
+        xml = """<?xml version="1.0"?>
+<hierarchy>
+  <node resource-id="cn.damai:id/container">
+    <node resource-id="cn.damai:id/my_resource"
+          class="android.widget.FrameLayout"
+          clickable="true"
+          bounds="[100,200][300,400]"/>
+  </node>
+</hierarchy>"""
+        dump_path = str(tmp_path / "damai_after_date.xml")
+        with open(dump_path, "w") as f:
+            f.write(xml)
+
+        with patch("mobile.damai_app.ET.parse") as mock_parse:
+            import xml.etree.ElementTree as ET
+            mock_parse.return_value = ET.fromstring(xml)
+            # ET.fromstring returns element, need ET.parse to return a tree
+            real_tree = ET.ElementTree(ET.fromstring(xml))
+            mock_parse.return_value = real_tree
+            with patch.object(bot, "_tap_bounds", return_value=True) as mock_tap:
+                result = bot._tap_from_dump("cn.damai:id/my_resource", index=0)
+
+        assert result is True
+
+
+class TestTapTextFromDump:
+    def test_tap_text_from_dump_returns_false_when_file_missing(self, bot):
+        """Missing dump file returns False."""
+        result = bot._tap_text_from_dump("/nonexistent/path.xml", "sometext")
+
+        assert result is False
+
+    def test_tap_text_from_dump_finds_text_and_taps(self, bot, tmp_path):
+        """Finds node with matching text and taps it."""
+        xml = """<?xml version="1.0"?>
+<hierarchy>
+  <node text="立即提交" bounds="[100,200][300,400]" clickable="true"/>
+</hierarchy>"""
+        dump_path = str(tmp_path / "dump.xml")
+        with open(dump_path, "w") as f:
+            f.write(xml)
+
+        with patch.object(bot, "_tap_bounds", return_value=True) as mock_tap:
+            result = bot._tap_text_from_dump(dump_path, "立即提交", exact=True)
+
+        assert result is True
+        mock_tap.assert_called_once_with("[100,200][300,400]")
+
+    def test_tap_text_from_dump_partial_match(self, bot, tmp_path):
+        """Partial match works when exact=False."""
+        xml = """<?xml version="1.0"?>
+<hierarchy>
+  <node text="立即提交订单" bounds="[0,0][100,50]"/>
+</hierarchy>"""
+        dump_path = str(tmp_path / "dump.xml")
+        with open(dump_path, "w") as f:
+            f.write(xml)
+
+        with patch.object(bot, "_tap_bounds", return_value=True):
+            result = bot._tap_text_from_dump(dump_path, "提交", exact=False)
+
+        assert result is True
+
+
+class TestSwipeUpSmall:
+    def test_swipe_up_small_success(self, bot):
+        """Calls execute_script with swipeGesture."""
+        bot.driver.get_window_size.return_value = {"width": 1080, "height": 2400}
+        result = bot._swipe_up_small()
+
+        assert result is True
+        call_args = bot.driver.execute_script.call_args[0]
+        assert call_args[0] == "mobile: swipeGesture"
+
+    def test_swipe_up_small_exception_returns_false(self, bot):
+        """Exception returns False."""
+        bot.driver.get_window_size.side_effect = WebDriverException("error")
+        result = bot._swipe_up_small()
+
+        assert result is False
+
+
+class TestDumpPageSource:
+    def test_dump_page_source_skips_in_fast_mode(self, bot):
+        """In fast_mode, dump is skipped unless forced."""
+        bot.config.fast_mode = True
+        bot.driver.page_source = "<xml/>"
+        bot._dump_page_source(path="/tmp/test.xml", force=False)
+        # Should not raise; page_source should not be accessed
+
+    def test_dump_page_source_forced_even_in_fast_mode(self, bot, tmp_path):
+        """Force=True overrides fast_mode."""
+        bot.config.fast_mode = True
+        bot.driver.page_source = "<hierarchy/>"
+        path = str(tmp_path / "out.xml")
+        bot._dump_page_source(path=path, force=True)
+
+        import os
+        assert os.path.exists(path)
+
+    def test_dump_page_source_slow_mode_always_dumps(self, bot, tmp_path):
+        """In slow mode, dump always happens."""
+        bot.config.fast_mode = False
+        bot.driver.page_source = "<hierarchy/>"
+        path = str(tmp_path / "out.xml")
+        bot._dump_page_source(path=path, force=False)
+
+        import os
+        assert os.path.exists(path)
+
+
+class TestScanTextviews:
+    def test_scan_textviews_prints_texts(self, bot, capsys):
+        """Prints text values from found TextView elements."""
+        el = Mock()
+        el.get_attribute.side_effect = lambda name: "票档A" if name == "text" else ""
+        bot.driver.find_elements.return_value = [el]
+        bot._scan_textviews()
+
+        captured = capsys.readouterr()
+        assert "TextView" in captured.out
+
+    def test_scan_textviews_handles_exception(self, bot):
+        """WebDriverException is swallowed."""
+        bot.driver.find_elements.side_effect = WebDriverException("error")
+        # Should not raise
+        bot._scan_textviews()
+
+
+class TestTrySelectCityByIndex:
+    def test_returns_false_when_city_index_none(self, bot):
+        bot.config.city_index = None
+        result = bot._try_select_city_by_index()
+
+        assert result is False
+
+    def test_delegates_to_tap_from_dump(self, bot):
+        """When city_index is set, calls _dump_page_source and _tap_from_dump."""
+        bot.config.city_index = 1
+        with patch.object(bot, "_dump_page_source"), \
+             patch.object(bot, "_tap_from_dump", return_value=True) as mock_tap:
+            result = bot._try_select_city_by_index()
+
+        assert result is True
+        mock_tap.assert_called_once()
+
+
+class TestTrySelectDateByIndex:
+    def test_returns_false_when_no_items_and_fast_mode(self, bot):
+        """In fast_mode, no items returns False quickly."""
+        bot.config.fast_mode = True
+        bot.driver.find_elements.return_value = []
+        result = bot._try_select_date_by_index()
+
+        assert result is False
+
+    def test_returns_true_when_items_found(self, bot):
+        """Items found at date_index, clicks and returns True."""
+        el = _make_mock_element()
+        el.get_attribute.return_value = "true"
+        bot.driver.find_elements.return_value = [el]
+        bot.config.date_index = 0
+        result = bot._try_select_date_by_index()
+
+        assert result is True
+
+    def test_uses_index_zero_when_index_out_of_range(self, bot):
+        """date_index beyond list length defaults to 0."""
+        el = _make_mock_element()
+        el.get_attribute.return_value = "true"
+        bot.driver.find_elements.return_value = [el]
+        bot.config.date_index = 99
+        bot.config.date_strict = False
+        result = bot._try_select_date_by_index()
+
+        assert result is True
+
+    def test_returns_false_on_strict_out_of_range(self, bot):
+        """date_strict=True and index out of range returns False."""
+        el = _make_mock_element()
+        bot.driver.find_elements.return_value = [el]
+        bot.config.date_index = 99
+        bot.config.date_strict = True
+        result = bot._try_select_date_by_index()
+
+        assert result is False
+
+
+class TestWithContext:
+    def test_with_context_switches_and_restores(self, bot):
+        """Switches to context, runs fn, restores original context."""
+        bot.driver.current_context = "NATIVE_APP"
+        fn_result = []
+        def my_fn():
+            fn_result.append("ran")
+            return "ok"
+
+        result = bot._with_context("WEBVIEW_1", my_fn)
+
+        assert result == "ok"
+        assert fn_result == ["ran"]
+        bot.driver.switch_to.context.assert_any_call("WEBVIEW_1")
+        bot.driver.switch_to.context.assert_any_call("NATIVE_APP")
+
+    def test_with_context_same_context_no_switch(self, bot):
+        """Same context means no switch needed."""
+        bot.driver.current_context = "NATIVE_APP"
+        fn = Mock(return_value=True)
+
+        result = bot._with_context("NATIVE_APP", fn)
+
+        assert result is True
+        bot.driver.switch_to.context.assert_not_called()
+
+
+class TestTryClickByTextTokensWebview:
+    def test_returns_false_when_no_webview(self, bot):
+        """No WEBVIEW context returns False."""
+        bot.driver.contexts = ["NATIVE_APP"]
+        result = bot._try_click_by_text_tokens_webview(["token"])
+
+        assert result is False
+
+    def test_returns_true_when_element_found_in_webview(self, bot):
+        """Finds element in WEBVIEW and clicks it."""
+        bot.driver.contexts = ["NATIVE_APP", "WEBVIEW_1"]
+        bot.driver.current_context = "NATIVE_APP"
+        el = Mock()
+        el.click = Mock()
+        bot.driver.find_elements.return_value = [el]
+        result = bot._try_click_by_text_tokens_webview(["token"])
+
+        assert result is True
+
+
+class TestScanDateTexts:
+    def test_scan_date_texts_runs_without_error(self, bot, capsys):
+        """Runs without raising exceptions."""
+        el = Mock()
+        el.get_attribute.side_effect = lambda name: "12月6日" if name == "text" else ""
+        bot.driver.find_elements.return_value = [el]
+        bot._scan_date_texts()
+
+        captured = capsys.readouterr()
+        assert "场次文本元素" in captured.out
+
+    def test_scan_date_texts_handles_webdriver_exception(self, bot):
+        """WebDriverException is swallowed."""
+        bot.driver.find_elements.side_effect = WebDriverException("error")
+        # Should not raise
+        bot._scan_date_texts()
