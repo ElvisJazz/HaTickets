@@ -453,3 +453,40 @@ class TestMobileConfigLoadConfig:
 
         assert (tmp_path / "config.local.jsonc").exists()
         assert load_config_dict() == source
+
+
+# ---------------------------------------------------------------------------
+# Uncovered validation branches
+# ---------------------------------------------------------------------------
+
+class TestUncoveredBranches:
+    def test_keyword_none_with_no_item_ref_raises(self):
+        """keyword=None without item_url or item_id raises ValueError."""
+        with pytest.raises(ValueError, match="keyword"):
+            Config(**_make(keyword=None, item_url=None, item_id=None))
+
+    def test_sell_start_time_non_string_raises(self):
+        """sell_start_time as int (not str) raises ValueError."""
+        with pytest.raises(ValueError, match="sell_start_time"):
+            Config(**_make(sell_start_time=12345))
+
+    def test_load_config_missing_keyword_and_item_raises(self, tmp_path, monkeypatch):
+        """Config.load_config raises KeyError when keyword/item_url/item_id all absent."""
+        monkeypatch.chdir(tmp_path)
+        source = {
+            "server_url": "http://127.0.0.1:4723",
+            "device_name": "Android",
+            "app_package": "cn.damai",
+            "app_activity": ".SplashMainActivity",
+            "users": ["A"],
+            "city": "北京",
+            "date": "01.01",
+            "price": "100元",
+            "price_index": 0,
+            "if_commit_order": False,
+            "probe_only": False,
+        }
+        import json
+        (tmp_path / "config.jsonc").write_text(json.dumps(source))
+        with pytest.raises(KeyError, match="keyword"):
+            Config.load_config()

@@ -1,10 +1,20 @@
 """Unit tests for mobile/hot_path_benchmark.py."""
 
+import pytest
 from argparse import Namespace
 from unittest.mock import Mock, patch
 
 from mobile.config import Config
-from mobile.hot_path_benchmark import build_benchmark_config, format_report, run_benchmark
+from mobile.hot_path_benchmark import (
+    _default_config_path,
+    _repo_root,
+    _require_retryable_start,
+    build_benchmark_config,
+    format_report,
+    parse_args,
+    run_benchmark,
+    summarize_results,
+)
 
 
 def _make_config():
@@ -84,6 +94,178 @@ def test_run_benchmark_collects_results_and_recovery():
     assert payload["results"][1]["recovery_seconds"] is None
 
 
+# ---------------------------------------------------------------------------
+# _repo_root / _default_config_path
+# ---------------------------------------------------------------------------
+
+def test_repo_root_returns_path():
+    root = _repo_root()
+    assert root.is_dir()
+    assert (root / "mobile").is_dir()
+
+
+def test_default_config_path_returns_path():
+    path = _default_config_path()
+    assert path.name in ("config.local.jsonc", "config.jsonc")
+
+
+# ---------------------------------------------------------------------------
+# parse_args
+# ---------------------------------------------------------------------------
+
+class TestParseArgs:
+    def test_defaults(self):
+        args = parse_args([])
+        assert args.runs == 3
+        assert args.price is None
+        assert args.price_index is None
+        assert args.city is None
+        assert args.date is None
+        assert args.json_output is False
+
+    def test_all_overrides(self):
+        args = parse_args([
+            "--runs", "5",
+            "--price", "580元",
+            "--price-index", "2",
+            "--city", "成都",
+            "--date", "04.18",
+            "--json",
+        ])
+        assert args.runs == 5
+        assert args.price == "580元"
+        assert args.price_index == 2
+        assert args.city == "成都"
+        assert args.date == "04.18"
+        assert args.json_output is True
+
+    def test_config_override(self, tmp_path):
+        cfg_file = tmp_path / "test_config.jsonc"
+        cfg_file.write_text("{}")
+        args = parse_args(["--config", str(cfg_file)])
+        assert args.config == str(cfg_file)
+
+
+# ---------------------------------------------------------------------------
+# build_benchmark_config — None override branches
+# ---------------------------------------------------------------------------
+
+class TestBuildBenchmarkConfigNoneArgs:
+    def test_none_price_keeps_base(self):
+        base = _make_config()
+        args = Namespace(price=None, price_index=None, city=None, date=None)
+        cfg = build_benchmark_config(base, args)
+        assert cfg.price == "899元"
+
+    def test_none_price_index_keeps_base(self):
+        base = _make_config()
+        args = Namespace(price=None, price_index=None, city=None, date=None)
+        cfg = build_benchmark_config(base, args)
+        assert cfg.price_index == 5
+
+    def test_none_city_keeps_base(self):
+        base = _make_config()
+        args = Namespace(price=None, price_index=None, city=None, date=None)
+        cfg = build_benchmark_config(base, args)
+        assert cfg.city == "上海"
+
+    def test_none_date_keeps_base(self):
+        base = _make_config()
+        args = Namespace(price=None, price_index=None, city=None, date=None)
+        cfg = build_benchmark_config(base, args)
+        assert cfg.date == "04.04"
+
+    def test_partial_overrides(self):
+        base = _make_config()
+        args = Namespace(price="580元", price_index=None, city=None, date=None)
+        cfg = build_benchmark_config(base, args)
+        assert cfg.price == "580元"
+        assert cfg.price_index == 5  # not overridden
+
+
+# ---------------------------------------------------------------------------
+# _require_retryable_start
+# ---------------------------------------------------------------------------
+
+class TestRequireRetryableStart:
+    def test_already_in_retryable_state(self):
+        bot = Mock()
+        bot.probe_current_page.return_value = {"state": "detail_page"}
+        result = _require_retryable_start(bot, "第1轮")
+        assert result["state"] == "detail_page"
+        bot._recover_to_detail_page_for_local_retry.assert_not_called()
+
+    def test_sku_page_also_retryable(self):
+        bot = Mock()
+        bot.probe_current_page.return_value = {"state": "sku_page"}
+        result = _require_retryable_start(bot, "第1轮")
+        assert result["state"] == "sku_page"
+
+    def test_recovery_succeeds(self):
+        bot = Mock()
+        bot.probe_current_page.return_value = {"state": "order_confirm_page"}
+        bot._recover_to_detail_page_for_local_retry.return_value = {"state": "detail_page"}
+        result = _require_retryable_start(bot, "第1轮")
+        assert result["state"] == "detail_page"
+
+    def test_recovery_fails_raises_runtime_error(self):
+        bot = Mock()
+        bot.probe_current_page.return_value = {"state": "unknown_page"}
+        bot._recover_to_detail_page_for_local_retry.return_value = {"state": "unknown_page"}
+        with pytest.raises(RuntimeError, match="未处于可抢票页面"):
+            _require_retryable_start(bot, "第1轮")
+
+
+# ---------------------------------------------------------------------------
+# run_benchmark — ValueError for runs < 1
+# ---------------------------------------------------------------------------
+
+def test_run_benchmark_raises_for_zero_runs():
+    bot = Mock()
+    with pytest.raises(ValueError, match="runs 必须大于等于 1"):
+        run_benchmark(bot, runs=0)
+
+
+def test_run_benchmark_raises_for_negative_runs():
+    bot = Mock()
+    with pytest.raises(ValueError):
+        run_benchmark(bot, runs=-1)
+
+
+# ---------------------------------------------------------------------------
+# summarize_results — no recovery values
+# ---------------------------------------------------------------------------
+
+class TestSummarizeResults:
+    def test_no_recovery_returns_none_avg(self):
+        results = [
+            {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": None},
+            {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
+        ]
+        summary = summarize_results(results)
+        assert summary["avg_recovery_seconds"] is None
+        assert summary["runs"] == 2
+        assert summary["success_count"] == 2
+        assert summary["avg_elapsed_seconds"] == 6.0
+
+    def test_with_recovery_values(self):
+        results = [
+            {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": 3.0},
+            {"elapsed_seconds": 7.0, "success": False, "recovery_seconds": 4.0},
+        ]
+        summary = summarize_results(results)
+        assert summary["avg_recovery_seconds"] == 3.5
+        assert summary["success_count"] == 1
+
+    def test_mixed_recovery_values(self):
+        results = [
+            {"elapsed_seconds": 5.0, "success": True, "recovery_seconds": 3.0},
+            {"elapsed_seconds": 7.0, "success": True, "recovery_seconds": None},
+        ]
+        summary = summarize_results(results)
+        assert summary["avg_recovery_seconds"] == 3.0
+
+
 def test_format_report_includes_summary_lines():
     payload = {
         "title": "【成都】顽童MJ116 OGS巡回演唱会-成都站",
@@ -117,3 +299,223 @@ def test_format_report_includes_summary_lines():
     assert "演出: 【成都】顽童MJ116 OGS巡回演唱会-成都站" in report
     assert "1. 8.11s | success | final=order_confirm_page | submit_ready=True | recover=3.83s -> sku_page" in report
     assert "runs=1, success=1/1" in report
+
+
+def test_format_report_no_recovery():
+    payload = {
+        "title": "张杰演唱会",
+        "initial_state": "detail_page",
+        "initial_activity": None,
+        "price": "580元",
+        "price_index": 0,
+        "results": [
+            {
+                "run": 1,
+                "success": False,
+                "elapsed_seconds": 3.5,
+                "final_state": "detail_page",
+                "submit_button_ready": False,
+                "recovery_seconds": None,
+                "recovery_state": "detail_page",
+            }
+        ],
+        "summary": {
+            "runs": 1,
+            "success_count": 0,
+            "avg_elapsed_seconds": 3.5,
+            "min_elapsed_seconds": 3.5,
+            "max_elapsed_seconds": 3.5,
+            "avg_recovery_seconds": None,
+        },
+    }
+    report = format_report(payload)
+    # No "recover=" segment for result with recovery_seconds=None
+    assert "recover=" not in report
+    assert "fail" in report
+    assert "recovery avg = -" in report
+
+
+def test_format_report_no_title():
+    payload = {
+        "title": None,
+        "initial_state": "sku_page",
+        "initial_activity": None,
+        "price": "280元",
+        "price_index": 1,
+        "results": [
+            {
+                "run": 1,
+                "success": True,
+                "elapsed_seconds": 2.0,
+                "final_state": "order_confirm_page",
+                "submit_button_ready": True,
+                "recovery_seconds": None,
+                "recovery_state": "order_confirm_page",
+            }
+        ],
+        "summary": {
+            "runs": 1,
+            "success_count": 1,
+            "avg_elapsed_seconds": 2.0,
+            "min_elapsed_seconds": 2.0,
+            "max_elapsed_seconds": 2.0,
+            "avg_recovery_seconds": None,
+        },
+    }
+    report = format_report(payload)
+    assert "未识别" in report
+
+
+# ---------------------------------------------------------------------------
+# main()
+# ---------------------------------------------------------------------------
+
+def test_main_runs_less_than_1_returns_1():
+    from mobile.hot_path_benchmark import main
+    result = main(["--runs", "0"])
+    assert result == 1
+
+
+def test_main_exception_returns_1(tmp_path):
+    from mobile.hot_path_benchmark import main
+    # Pass a non-existent config path to trigger Config.load_config exception
+    result = main(["--config", str(tmp_path / "nonexistent.jsonc"), "--runs", "1"])
+    assert result == 1
+
+
+def test_main_success_returns_0(tmp_path):
+    from mobile.hot_path_benchmark import main
+    mock_payload = {
+        "title": "张杰演唱会",
+        "initial_state": "detail_page",
+        "initial_activity": "SomeActivity",
+        "price": "580元",
+        "price_index": 0,
+        "results": [
+            {
+                "run": 1,
+                "success": True,
+                "elapsed_seconds": 3.5,
+                "final_state": "order_confirm_page",
+                "submit_button_ready": True,
+                "recovery_seconds": None,
+                "recovery_state": "order_confirm_page",
+            }
+        ],
+        "summary": {
+            "runs": 1,
+            "success_count": 1,
+            "avg_elapsed_seconds": 3.5,
+            "min_elapsed_seconds": 3.5,
+            "max_elapsed_seconds": 3.5,
+            "avg_recovery_seconds": None,
+        },
+    }
+    with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
+         patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
+         patch("mobile.hot_path_benchmark.DamaiBot") as mock_bot_cls, \
+         patch("mobile.hot_path_benchmark.run_benchmark", return_value=mock_payload):
+        mock_load.return_value = Mock()
+        mock_build.return_value = Mock()
+        mock_bot = Mock()
+        mock_bot.driver = None
+        mock_bot_cls.return_value = mock_bot
+        result = main(["--runs", "1"])
+    assert result == 0
+
+
+def test_main_partial_success_returns_1(tmp_path):
+    from mobile.hot_path_benchmark import main
+    mock_payload = {
+        "title": "测试",
+        "initial_state": "detail_page",
+        "initial_activity": None,
+        "price": "580元",
+        "price_index": 0,
+        "results": [
+            {"run": 1, "success": True, "elapsed_seconds": 3.0, "final_state": "order_confirm_page", "submit_button_ready": True, "recovery_seconds": None, "recovery_state": "order_confirm_page"},
+            {"run": 2, "success": False, "elapsed_seconds": 5.0, "final_state": "detail_page", "submit_button_ready": False, "recovery_seconds": None, "recovery_state": "detail_page"},
+        ],
+        "summary": {
+            "runs": 2,
+            "success_count": 1,
+            "avg_elapsed_seconds": 4.0,
+            "min_elapsed_seconds": 3.0,
+            "max_elapsed_seconds": 5.0,
+            "avg_recovery_seconds": None,
+        },
+    }
+    with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
+         patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
+         patch("mobile.hot_path_benchmark.DamaiBot") as mock_bot_cls, \
+         patch("mobile.hot_path_benchmark.run_benchmark", return_value=mock_payload):
+        mock_load.return_value = Mock()
+        mock_build.return_value = Mock()
+        mock_bot = Mock()
+        mock_bot.driver = None
+        mock_bot_cls.return_value = mock_bot
+        result = main(["--runs", "2"])
+    assert result == 1
+
+
+def test_main_json_output(capsys):
+    from mobile.hot_path_benchmark import main
+    mock_payload = {
+        "title": "张杰演唱会",
+        "initial_state": "detail_page",
+        "initial_activity": None,
+        "price": "580元",
+        "price_index": 0,
+        "results": [],
+        "summary": {
+            "runs": 0,
+            "success_count": 0,
+            "avg_elapsed_seconds": 0,
+            "min_elapsed_seconds": 0,
+            "max_elapsed_seconds": 0,
+            "avg_recovery_seconds": None,
+        },
+    }
+    with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
+         patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
+         patch("mobile.hot_path_benchmark.DamaiBot") as mock_bot_cls, \
+         patch("mobile.hot_path_benchmark.run_benchmark", return_value=mock_payload):
+        mock_load.return_value = Mock()
+        mock_build.return_value = Mock()
+        mock_bot = Mock()
+        mock_bot.driver = None
+        mock_bot_cls.return_value = mock_bot
+        main(["--runs", "1", "--json"])
+    captured = capsys.readouterr()
+    import json
+    data = json.loads(captured.out)
+    assert data["title"] == "张杰演唱会"
+
+
+def test_main_bot_driver_quit_called():
+    from mobile.hot_path_benchmark import main
+    mock_payload = {
+        "title": "测试",
+        "initial_state": "detail_page",
+        "initial_activity": None,
+        "price": "580元",
+        "price_index": 0,
+        "results": [
+            {"run": 1, "success": True, "elapsed_seconds": 3.0, "final_state": "order_confirm_page",
+             "submit_button_ready": True, "recovery_seconds": None, "recovery_state": "order_confirm_page"},
+        ],
+        "summary": {"runs": 1, "success_count": 1, "avg_elapsed_seconds": 3.0,
+                    "min_elapsed_seconds": 3.0, "max_elapsed_seconds": 3.0, "avg_recovery_seconds": None},
+    }
+    mock_driver = Mock()
+    with patch("mobile.hot_path_benchmark.Config.load_config") as mock_load, \
+         patch("mobile.hot_path_benchmark.build_benchmark_config") as mock_build, \
+         patch("mobile.hot_path_benchmark.DamaiBot") as mock_bot_cls, \
+         patch("mobile.hot_path_benchmark.run_benchmark", return_value=mock_payload):
+        mock_load.return_value = Mock()
+        mock_build.return_value = Mock()
+        mock_bot = Mock()
+        mock_bot.driver = mock_driver
+        mock_bot_cls.return_value = mock_bot
+        main(["--runs", "1"])
+    mock_driver.quit.assert_called_once()

@@ -1826,3 +1826,306 @@ class TestPriceSelection:
 
         assert result is True
         assert "通过配置索引直接选择票价" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Utility method coverage: _safe_element_text / _safe_element_texts
+# ---------------------------------------------------------------------------
+
+class TestSafeElementText:
+    def test_returns_first_nonempty_text(self, bot):
+        container = Mock()
+        el1 = Mock()
+        el1.text = "  "  # whitespace only
+        el2 = Mock()
+        el2.text = "580元"
+        container.find_elements.return_value = [el1, el2]
+        result = bot._safe_element_text(container, By.CLASS_NAME, "tv_price")
+        assert result == "580元"
+
+    def test_returns_empty_when_all_empty(self, bot):
+        container = Mock()
+        el = Mock()
+        el.text = "  "
+        container.find_elements.return_value = [el]
+        result = bot._safe_element_text(container, By.CLASS_NAME, "tv_price")
+        assert result == ""
+
+    def test_returns_empty_on_exception(self, bot):
+        container = Mock()
+        container.find_elements.side_effect = Exception("driver error")
+        result = bot._safe_element_text(container, By.CLASS_NAME, "tv_price")
+        assert result == ""
+
+    def test_returns_empty_when_no_elements(self, bot):
+        container = Mock()
+        container.find_elements.return_value = []
+        result = bot._safe_element_text(container, By.CLASS_NAME, "tv_price")
+        assert result == ""
+
+
+class TestSafeElementTexts:
+    def test_returns_unique_nonempty_texts(self, bot):
+        container = Mock()
+        el1 = Mock()
+        el1.text = "580元"
+        el2 = Mock()
+        el2.text = "580元"  # duplicate
+        el3 = Mock()
+        el3.text = "1280元"
+        container.find_elements.return_value = [el1, el2, el3]
+        result = bot._safe_element_texts(container, By.CLASS_NAME, "tv_price")
+        assert result == ["580元", "1280元"]
+
+    def test_returns_empty_list_on_exception(self, bot):
+        container = Mock()
+        container.find_elements.side_effect = Exception("driver error")
+        result = bot._safe_element_texts(container, By.CLASS_NAME, "tv_price")
+        assert result == []
+
+    def test_filters_empty_texts(self, bot):
+        container = Mock()
+        el1 = Mock()
+        el1.text = ""
+        el2 = Mock()
+        el2.text = "380元"
+        container.find_elements.return_value = [el1, el2]
+        result = bot._safe_element_texts(container, By.CLASS_NAME, "tv_price")
+        assert result == ["380元"]
+
+
+# ---------------------------------------------------------------------------
+# _collect_descendant_texts
+# ---------------------------------------------------------------------------
+
+class TestCollectDescendantTexts:
+    def test_returns_unique_texts(self, bot):
+        container = Mock()
+        el1 = Mock()
+        el1.text = "580元"
+        el2 = Mock()
+        el2.text = "580元"  # duplicate
+        el3 = Mock()
+        el3.text = "可预约"
+        container.find_elements.return_value = [el1, el2, el3]
+        result = bot._collect_descendant_texts(container)
+        assert result == ["580元", "可预约"]
+
+    def test_returns_empty_on_find_elements_exception(self, bot):
+        container = Mock()
+        container.find_elements.side_effect = Exception("error")
+        result = bot._collect_descendant_texts(container)
+        assert result == []
+
+    def test_handles_element_text_exception(self, bot):
+        container = Mock()
+        el1 = Mock()
+        type(el1).text = PropertyMock(side_effect=Exception("stale element"))
+        el2 = Mock()
+        el2.text = "正常文本"
+        container.find_elements.return_value = [el1, el2]
+        result = bot._collect_descendant_texts(container)
+        assert result == ["正常文本"]
+
+
+# ---------------------------------------------------------------------------
+# _has_element exception path / _get_current_activity exception path
+# ---------------------------------------------------------------------------
+
+class TestHasElementExceptionPath:
+    def test_has_element_returns_false_on_exception(self, bot):
+        bot.driver.find_elements.side_effect = Exception("driver error")
+        result = bot._has_element(By.ID, "some_id")
+        assert result is False
+        bot.driver.find_elements.side_effect = None  # reset
+
+    def test_has_any_element_returns_false_when_all_miss(self, bot):
+        bot.driver.find_elements.return_value = []
+        result = bot._has_any_element([(By.ID, "id1"), (By.ID, "id2")])
+        assert result is False
+
+
+class TestGetCurrentActivityExceptionPath:
+    def test_returns_empty_string_on_exception(self, bot):
+        type(bot.driver).current_activity = PropertyMock(side_effect=Exception("error"))
+        result = bot._get_current_activity()
+        assert result == ""
+        # cleanup
+        type(bot.driver).current_activity = PropertyMock(return_value="SomeActivity")
+
+
+# ---------------------------------------------------------------------------
+# _click_element_center / _burst_click_element_center / _burst_click_coordinates
+# ---------------------------------------------------------------------------
+
+class TestClickHelpers:
+    def test_click_element_center_calls_script(self, bot):
+        el = _make_mock_element(x=100, y=200, width=50, height=40)
+        bot._click_element_center(el)
+        bot.driver.execute_script.assert_called_with(
+            "mobile: clickGesture",
+            {"x": 125, "y": 220, "duration": 50},
+        )
+
+    def test_burst_click_element_center_calls_multiple_times(self, bot):
+        el = _make_mock_element(x=100, y=200, width=50, height=40)
+        with patch("mobile.damai_app.time.sleep") as mock_sleep:
+            bot._burst_click_element_center(el, count=3, interval_ms=10)
+        assert bot.driver.execute_script.call_count >= 3
+        assert mock_sleep.call_count == 2  # sleeps between calls
+
+    def test_burst_click_element_center_no_sleep_when_zero_interval(self, bot):
+        el = _make_mock_element(x=100, y=200, width=50, height=40)
+        bot.driver.execute_script.reset_mock()
+        with patch("mobile.damai_app.time.sleep") as mock_sleep:
+            bot._burst_click_element_center(el, count=2, interval_ms=0)
+        assert mock_sleep.call_count == 0
+
+    def test_burst_click_coordinates_calls_script(self, bot):
+        bot.driver.execute_script.reset_mock()
+        with patch("mobile.damai_app.time.sleep"):
+            bot._burst_click_coordinates(100, 200, count=2, interval_ms=10)
+        assert bot.driver.execute_script.call_count == 2
+
+    def test_burst_click_coordinates_no_sleep_for_single(self, bot):
+        bot.driver.execute_script.reset_mock()
+        with patch("mobile.damai_app.time.sleep") as mock_sleep:
+            bot._burst_click_coordinates(100, 200, count=1, interval_ms=10)
+        assert mock_sleep.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# smart_wait_for_element — backup selectors and not-found path
+# ---------------------------------------------------------------------------
+
+class TestSmartWaitForElement:
+    def test_returns_true_on_primary_found(self, bot):
+        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+            mock_wdw.return_value.until.return_value = Mock()
+            result = bot.smart_wait_for_element(By.ID, "some_id")
+        assert result is True
+
+    def test_returns_false_when_all_timeout(self, bot):
+        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+            mock_wdw.return_value.until.side_effect = TimeoutException()
+            result = bot.smart_wait_for_element(
+                By.ID, "primary_id",
+                backup_selectors=[(By.ID, "backup_id")],
+            )
+        assert result is False
+
+    def test_uses_backup_when_primary_fails(self, bot):
+        call_count = [0]
+        def until_side_effect(condition):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise TimeoutException()
+            return Mock()
+        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+            mock_wdw.return_value.until.side_effect = until_side_effect
+            result = bot.smart_wait_for_element(
+                By.ID, "primary_id",
+                backup_selectors=[(By.ID, "backup_id")],
+            )
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# wait_for_page_state — timeout path
+# ---------------------------------------------------------------------------
+
+class TestWaitForPageState:
+    def test_returns_last_probe_on_timeout(self, bot):
+        with patch.object(bot, "probe_current_page",
+                          return_value={"state": "unknown_state"}), \
+             patch("mobile.damai_app.time.time", side_effect=[0.0, 10.0, 20.0]), \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot.wait_for_page_state({"order_confirm_page"}, timeout=5)
+        assert result["state"] == "unknown_state"
+
+    def test_returns_immediately_on_matching_state(self, bot):
+        with patch.object(bot, "probe_current_page",
+                          return_value={"state": "detail_page"}), \
+             patch("mobile.damai_app.time.time", side_effect=[0.0, 1.0]), \
+             patch("mobile.damai_app.time.sleep"):
+            result = bot.wait_for_page_state({"detail_page"})
+        assert result["state"] == "detail_page"
+
+
+# ---------------------------------------------------------------------------
+# _prepare_runtime_config — error handling and city mismatch branches
+# ---------------------------------------------------------------------------
+
+class TestPrepareRuntimeConfig:
+    def _make_config_with_item_url(self, keyword="张杰 演唱会", city="北京"):
+        return Config(
+            server_url="http://127.0.0.1:4723",
+            device_name="Android",
+            udid=None,
+            platform_version=None,
+            app_package="cn.damai",
+            app_activity=".launcher.splash.SplashMainActivity",
+            keyword=keyword,
+            users=["UserA"],
+            city=city,
+            date="04.06",
+            price="580元",
+            price_index=0,
+            if_commit_order=False,
+            probe_only=True,
+            item_url="https://m.damai.cn/damai/detail/item.html?itemId=1016133935724",
+            item_id=None,
+        )
+
+    def test_resolve_error_with_keyword_logs_warning_and_continues(self, caplog):
+        """If DamaiItemResolveError and keyword exists, log warning and return."""
+        from mobile.item_resolver import DamaiItemResolveError
+        cfg = self._make_config_with_item_url(keyword="张杰 演唱会")
+        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls, \
+             caplog.at_level("WARNING", logger="mobile.damai_app"):
+            mock_resolver_cls.return_value.fetch_item_detail.side_effect = DamaiItemResolveError("网络错误")
+            bot = DamaiBot(config=cfg, setup_driver=False)
+        assert bot.item_detail is None
+        assert "继续使用现有 keyword" in caplog.text
+
+    def test_resolve_error_without_keyword_raises(self):
+        """If DamaiItemResolveError and no keyword (None), re-raise."""
+        from mobile.item_resolver import DamaiItemResolveError
+        cfg = self._make_config_with_item_url(keyword="张杰 演唱会")
+        # Directly set keyword to None after construction to bypass validation
+        cfg.keyword = None
+        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
+            mock_resolver_cls.return_value.fetch_item_detail.side_effect = DamaiItemResolveError("网络错误")
+            with pytest.raises(DamaiItemResolveError):
+                DamaiBot(config=cfg, setup_driver=False)
+
+    def test_city_mismatch_raises_value_error(self):
+        """If fetched city doesn't match config city, raise ValueError."""
+        item_detail = _make_item_detail()  # city_name="北京市"
+        cfg = self._make_config_with_item_url(city="上海")  # mismatch!
+        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
+            mock_resolver_cls.return_value.fetch_item_detail.return_value = item_detail
+            with pytest.raises(ValueError, match="不一致"):
+                DamaiBot(config=cfg, setup_driver=False)
+
+    def test_keyword_auto_populated_from_item_detail(self):
+        """When keyword is None and item resolves OK, keyword is set from item_detail."""
+        item_detail_with_keyword = DamaiItemDetail(
+            item_id="1016133935724",
+            item_name="张杰演唱会",
+            item_name_display="张杰演唱会",
+            city_name="北京市",
+            venue_name="鸟巢",
+            venue_city_name="北京市",
+            show_time="2026.04.06",
+            price_range="580-1280",
+            raw_data={},
+        )
+        cfg = self._make_config_with_item_url(city="北京", keyword="张杰 演唱会")
+        # Directly set keyword to None after construction
+        cfg.keyword = None
+        with patch("mobile.damai_app.DamaiItemResolver") as mock_resolver_cls:
+            mock_resolver_cls.return_value.fetch_item_detail.return_value = item_detail_with_keyword
+            bot = DamaiBot(config=cfg, setup_driver=False)
+        assert bot.item_detail is not None
+        assert bot.config.keyword is not None  # auto-populated
