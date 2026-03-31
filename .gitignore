@@ -11,7 +11,6 @@ node_modules
 dist
 dist-ssr
 *.local
-config.jsonc
 
 # Editor directories and files
 .vscode/*
@@ -37,8 +36,9 @@ htmlcov/
 .pytest_cache/
 
 # Real config files (use *.example as template)
-web/config.local.json
+mobile/config.jsonc
 mobile/config.local.jsonc
+web/config.local.json
 
 # Appium / local debug artifacts
 .appium/
