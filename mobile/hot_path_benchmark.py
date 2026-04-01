@@ -182,12 +182,11 @@ def _shell_back(bot: DamaiBot, count: int = 1):
 
 
 def _fast_recover_to_detail(bot: DamaiBot, max_backs: int = 4) -> dict:
-    """Fast benchmark recovery: batch shell back + single check.
+    """Fast benchmark recovery: incremental back + check after each.
 
-    From order_confirm_page the path is deterministic:
-    order_confirm → back → sku → back → detail (2 backs).
-    Fire 2 backs in one shell call, then check once.  Only loop
-    with individual backs if the batch didn't land on detail_page.
+    Presses one back at a time and re-checks for detail_page to avoid
+    overshooting when the app is already partway through the stack
+    (e.g. on sku_page after a failed run).
     """
     # Already on detail?
     fast = _fast_check_detail_page(bot)

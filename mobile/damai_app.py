@@ -157,12 +157,12 @@ class DamaiBot:
             })
             if manual_baseline_seconds is None:
                 logger.info(f"步骤耗时[{step_name}] {elapsed:.2f}s")
-                return
-            relation = "快于手动基线" if faster_than_manual else "慢于手动基线"
-            log_fn = logger.info if faster_than_manual else logger.warning
-            log_fn(
-                f"步骤耗时[{step_name}] {elapsed:.2f}s（手动基线 {manual_baseline_seconds:.2f}s，{relation}）"
-            )
+            else:
+                relation = "快于手动基线" if faster_than_manual else "慢于手动基线"
+                log_fn = logger.info if faster_than_manual else logger.warning
+                log_fn(
+                    f"步骤耗时[{step_name}] {elapsed:.2f}s（手动基线 {manual_baseline_seconds:.2f}s，{relation}）"
+                )
 
     def _prepare_runtime_config(self):
         """Resolve item metadata before creating the Appium session."""
@@ -420,7 +420,7 @@ class DamaiBot:
 
     def _qualify_resource_id(self, value: str) -> str:
         """补全裸 ID 为完整 resourceId（如 'img_jia' → 'cn.damai:id/img_jia'）。"""
-        if ":id/" in value:
+        if not value or ":id/" in value:
             return value
         pkg = getattr(self.config, "app_package", "cn.damai")
         return f"{pkg}:id/{value}"
@@ -2160,15 +2160,27 @@ class DamaiBot:
             if not normalized_keyword or normalized_keyword in tried:
                 continue
 
-            # 关键词重试前：关闭弹窗并确认在可搜索页面
+            # 关键词重试前：关闭弹窗并归一化到 search_page
             if tried:
                 self.dismiss_startup_popups()
                 probe = self.probe_current_page()
-                if probe["state"] not in {"search_page", "homepage"}:
-                    probe = self._recover_to_navigation_start(probe)
-                    if probe["state"] not in {"search_page", "homepage"}:
-                        logger.warning(f"重试关键词前页面状态异常: {probe['state']}，跳过")
-                        break
+                if probe["state"] in {"detail_page", "sku_page"}:
+                    probe = self._exit_non_target_event_context(probe)
+                    if probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(probe):
+                        return {
+                            "used_keyword": keyword,
+                            "search_results": [],
+                            "page_probe": probe,
+                            "step_timings": list(self._last_discovery_step_timings),
+                        }
+                if probe["state"] == "homepage":
+                    if not self._open_search_from_homepage():
+                        logger.warning("重试关键词前无法从首页进入搜索页，跳过该关键词")
+                        continue
+                    probe = self.probe_current_page()
+                if probe["state"] != "search_page":
+                    logger.warning(f"重试关键词前页面状态异常: {probe['state']}，跳过该关键词")
+                    continue
 
             self.config.keyword = keyword
             logger.info(f"尝试搜索关键词: {keyword}")

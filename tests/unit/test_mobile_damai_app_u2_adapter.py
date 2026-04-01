@@ -361,17 +361,25 @@ class TestU2SearchHotPath:
         dismiss.assert_called_once()
 
 
-class TestDiscoverKeywordRetryPopup:
-    """P3 fix: keyword retry dismisses popups and verifies page state."""
+class TestDiscoverKeywordRetryNavigation:
+    """Keyword retry must normalize to search_page before submitting next keyword."""
 
-    def test_second_keyword_dismisses_popup_before_search(self):
+    def test_retry_on_search_page_dismisses_popup_and_submits(self):
+        """Happy path: still on search_page after first keyword, dismiss popup and retry."""
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
         bot.config.keyword = "陈慧娴 演唱会"
         call_order = []
 
+        # probe transitions: search_page (retry check)
+        # final probe after second keyword opens target: detail_page
+        probe_states = iter([
+            {"state": "search_page"},  # retry: probe before second keyword
+            {"state": "detail_page"},  # final: after target opened
+        ])
+
         with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
              patch.object(bot, "dismiss_startup_popups", side_effect=lambda: call_order.append("dismiss")), \
-             patch.object(bot, "probe_current_page", return_value={"state": "search_page"}), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
              patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
              patch.object(
                  bot,
@@ -380,8 +388,7 @@ class TestDiscoverKeywordRetryPopup:
                      {"opened": False, "search_results": [{"score": 50, "title": "其他"}]},
                      {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
                  ],
-             ), \
-             patch.object(bot, "probe_current_page", return_value={"state": "detail_page"}):
+             ):
             result = bot.discover_target_event(
                 ["陈慧娴 演唱会", "陈慧娴"],
                 initial_probe={"state": "search_page"},
@@ -391,14 +398,22 @@ class TestDiscoverKeywordRetryPopup:
         assert submit.call_count == 2
         assert "dismiss" in call_order
 
-    def test_retry_recovers_page_state_when_not_on_search(self):
+    def test_retry_exits_detail_page_then_submits(self):
+        """After first keyword, landed on detail_page → exit context → search_page → retry."""
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
         bot.config.keyword = "陈慧娴 演唱会"
 
-        with patch.object(bot, "_recover_to_navigation_start") as recover, \
+        probe_states = iter([
+            {"state": "detail_page"},   # retry: probe finds detail_page
+            {"state": "detail_page"},   # final: after second keyword opens target
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
              patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={"state": "detail_page"}), \
-             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_exit_non_target_event_context",
+                          return_value={"state": "search_page"}) as exit_ctx, \
+             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
              patch.object(
                  bot,
                  "_open_target_from_search_results",
@@ -407,43 +422,177 @@ class TestDiscoverKeywordRetryPopup:
                      {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
                  ],
              ):
-            recover.side_effect = [
-                {"state": "search_page"},  # initial recovery
-                {"state": "search_page"},  # retry recovery
-            ]
             result = bot.discover_target_event(
                 ["陈慧娴 演唱会", "陈慧娴"],
                 initial_probe={"state": "search_page"},
             )
 
         assert result is not None
-        # recover called twice: once at start, once before retry
-        assert recover.call_count == 2
+        exit_ctx.assert_called_once()
+        assert submit.call_count == 2
 
-    def test_retry_breaks_when_page_unrecoverable(self):
+    def test_retry_from_homepage_opens_search_then_submits(self):
+        """After first keyword, landed on homepage → open search → retry."""
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
         bot.config.keyword = "陈慧娴 演唱会"
 
-        with patch.object(bot, "_recover_to_navigation_start") as recover, \
+        probe_states = iter([
+            {"state": "homepage"},      # retry: probe finds homepage
+            {"state": "search_page"},   # after _open_search_from_homepage
+            {"state": "detail_page"},   # final: after second keyword opens target
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
              patch.object(bot, "dismiss_startup_popups"), \
-             patch.object(bot, "probe_current_page", return_value={"state": "unknown"}), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_open_search_from_homepage", return_value=True) as open_search, \
+             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
+             patch.object(
+                 bot,
+                 "_open_target_from_search_results",
+                 side_effect=[
+                     {"opened": False, "search_results": []},
+                     {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
+                 ],
+             ):
+            result = bot.discover_target_event(
+                ["陈慧娴 演唱会", "陈慧娴"],
+                initial_probe={"state": "search_page"},
+            )
+
+        assert result is not None
+        open_search.assert_called_once()
+        assert submit.call_count == 2
+
+    def test_retry_skips_keyword_but_tries_remaining_on_unknown_state(self):
+        """Unknown state after retry → skip that keyword with continue, try next."""
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot.config.keyword = "陈慧娴 演唱会"
+
+        probe_states = iter([
+            {"state": "unknown"},       # retry: probe for 2nd keyword → unknown
+            {"state": "search_page"},   # retry: probe for 3rd keyword → search_page
+            {"state": "detail_page"},   # final
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
+             patch.object(
+                 bot,
+                 "_open_target_from_search_results",
+                 side_effect=[
+                     {"opened": False, "search_results": []},
+                     {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
+                 ],
+             ):
+            result = bot.discover_target_event(
+                ["陈慧娴 演唱会", "陈慧娴", "慧娴"],
+                initial_probe={"state": "search_page"},
+            )
+
+        assert result is not None
+        # 1st keyword submitted, 2nd skipped (unknown), 3rd submitted
+        assert submit.call_count == 2
+
+    def test_retry_homepage_open_search_fails_continues_to_next(self):
+        """homepage but _open_search_from_homepage fails → skip keyword, try next."""
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot.config.keyword = "陈慧娴 演唱会"
+
+        probe_states = iter([
+            {"state": "homepage"},      # retry: 2nd keyword → homepage
+            {"state": "search_page"},   # retry: 3rd keyword → search_page
+            {"state": "detail_page"},   # final
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_open_search_from_homepage", side_effect=[False, True]) as open_search, \
+             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
+             patch.object(
+                 bot,
+                 "_open_target_from_search_results",
+                 side_effect=[
+                     {"opened": False, "search_results": []},
+                     {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
+                 ],
+             ):
+            result = bot.discover_target_event(
+                ["陈慧娴 演唱会", "陈慧娴", "慧娴"],
+                initial_probe={"state": "search_page"},
+            )
+
+        assert result is not None
+        assert open_search.call_count == 1  # only called for 2nd keyword (homepage)
+        assert submit.call_count == 2  # 1st + 3rd keyword
+
+    def test_retry_exits_sku_page_then_submits(self):
+        """After first keyword, landed on sku_page → exit context → search_page → retry."""
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot.config.keyword = "陈慧娴 演唱会"
+
+        probe_states = iter([
+            {"state": "sku_page"},      # retry: probe finds sku_page
+            {"state": "detail_page"},   # final
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_exit_non_target_event_context",
+                          return_value={"state": "search_page"}) as exit_ctx, \
+             patch.object(bot, "_submit_search_keyword", side_effect=[True, True]) as submit, \
+             patch.object(
+                 bot,
+                 "_open_target_from_search_results",
+                 side_effect=[
+                     {"opened": False, "search_results": []},
+                     {"opened": True, "search_results": [{"score": 90, "title": "陈慧娴"}]},
+                 ],
+             ):
+            result = bot.discover_target_event(
+                ["陈慧娴 演唱会", "陈慧娴"],
+                initial_probe={"state": "search_page"},
+            )
+
+        assert result is not None
+        exit_ctx.assert_called_once()
+        assert submit.call_count == 2
+
+    def test_retry_shortcircuits_when_exit_lands_on_target(self):
+        """_exit_non_target_event_context returns target-matching detail_page → return success."""
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        bot.config.keyword = "陈慧娴 演唱会"
+
+        probe_states = iter([
+            {"state": "detail_page"},   # retry: probe finds detail_page
+        ])
+
+        with patch.object(bot, "_recover_to_navigation_start", return_value={"state": "search_page"}), \
+             patch.object(bot, "dismiss_startup_popups"), \
+             patch.object(bot, "probe_current_page", side_effect=lambda: next(probe_states)), \
+             patch.object(bot, "_exit_non_target_event_context",
+                          return_value={"state": "detail_page"}) as exit_ctx, \
+             patch.object(bot, "_current_page_matches_target", return_value=True), \
              patch.object(bot, "_submit_search_keyword", return_value=True) as submit, \
              patch.object(
                  bot,
                  "_open_target_from_search_results",
                  return_value={"opened": False, "search_results": []},
              ):
-            recover.side_effect = [
-                {"state": "search_page"},  # initial
-                {"state": "unknown"},  # retry: unrecoverable
-            ]
             result = bot.discover_target_event(
                 ["陈慧娴 演唱会", "陈慧娴"],
                 initial_probe={"state": "search_page"},
             )
 
-        assert result is None
-        # second keyword should not even attempt submit
+        assert result is not None
+        assert result["used_keyword"] == "陈慧娴"
+        assert result["page_probe"]["state"] == "detail_page"
+        exit_ctx.assert_called_once()
+        # Should NOT attempt second keyword submit — short-circuited
         assert submit.call_count == 1
 
 
@@ -453,6 +602,10 @@ class TestQualifyResourceId:
     def test_bare_id_gets_qualified(self):
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
         assert bot._qualify_resource_id("img_jia") == "cn.damai:id/img_jia"
+
+    def test_empty_string_returns_empty(self):
+        bot = DamaiBot(config=_u2_config(), setup_driver=False)
+        assert bot._qualify_resource_id("") == ""
 
     def test_already_qualified_id_unchanged(self):
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
