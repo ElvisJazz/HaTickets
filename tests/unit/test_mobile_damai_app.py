@@ -14,6 +14,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from selenium.webdriver.common.by import By
 
 from mobile.damai_app import DamaiBot, logger as damai_logger
+from mobile.ui_primitives import logger as ui_primitives_logger
 from mobile.config import Config
 from mobile.item_resolver import DamaiItemDetail
 
@@ -46,10 +47,12 @@ def _make_item_detail():
 
 @pytest.fixture(autouse=True)
 def _enable_logger_propagation():
-    """Enable propagation on the damai_app logger so caplog can capture messages."""
+    """Enable propagation on the damai_app and ui_primitives loggers so caplog can capture messages."""
     damai_logger.propagate = True
+    ui_primitives_logger.propagate = True
     yield
     damai_logger.propagate = False
+    ui_primitives_logger.propagate = False
 
 
 @pytest.fixture
@@ -361,7 +364,7 @@ class TestUltraFastClick:
         """Element found, gesture click executed with center coords, returns True."""
         mock_el = _make_mock_element(x=100, y=200, width=50, height=40)
 
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.return_value = mock_el
             result = bot.ultra_fast_click("by", "value")
 
@@ -373,7 +376,7 @@ class TestUltraFastClick:
 
     def test_ultra_fast_click_timeout(self, bot):
         """WebDriverWait raises TimeoutException, returns False."""
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.side_effect = TimeoutException("timeout")
             result = bot.ultra_fast_click("by", "value")
 
@@ -489,9 +492,9 @@ class TestBatchClick:
     def test_batch_click_some_fail(self, bot, caplog):
         """Failed clicks log a warning but processing continues."""
         elements = [("by1", "v1"), ("by2", "v2")]
-        with caplog.at_level("WARNING", logger="mobile.damai_app"), \
+        with caplog.at_level("WARNING", logger="mobile.ui_primitives"), \
              patch.object(bot, "ultra_fast_click", side_effect=[False, True]) as ufc, \
-             patch("mobile.damai_app.time"):
+             patch("mobile.ui_primitives.time"):
             bot.batch_click(elements, delay=0.1)
 
         assert ufc.call_count == 2
@@ -508,9 +511,9 @@ class TestUltraBatchClick:
         el1 = _make_mock_element(x=10, y=20, width=100, height=50)
         el2 = _make_mock_element(x=200, y=300, width=60, height=30)
 
-        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
-             patch("mobile.damai_app.WebDriverWait") as MockWait, \
-             patch("mobile.damai_app.time"):
+        with caplog.at_level("DEBUG", logger="mobile.ui_primitives"), \
+             patch("mobile.ui_primitives.WebDriverWait") as MockWait, \
+             patch("mobile.ui_primitives.time"):
             MockWait.return_value.until.side_effect = [el1, el2]
             bot.ultra_batch_click([("by1", "v1"), ("by2", "v2")], timeout=2)
 
@@ -526,9 +529,9 @@ class TestUltraBatchClick:
         """Timed-out elements are skipped; found ones are still clicked."""
         el1 = _make_mock_element(x=10, y=20, width=100, height=50)
 
-        with caplog.at_level("DEBUG", logger="mobile.damai_app"), \
-             patch("mobile.damai_app.WebDriverWait") as MockWait, \
-             patch("mobile.damai_app.time"):
+        with caplog.at_level("DEBUG", logger="mobile.ui_primitives"), \
+             patch("mobile.ui_primitives.WebDriverWait") as MockWait, \
+             patch("mobile.ui_primitives.time"):
             MockWait.return_value.until.side_effect = [
                 el1,
                 TimeoutException("timeout"),
@@ -549,7 +552,7 @@ class TestSmartWaitAndClick:
     def test_smart_wait_and_click_primary_success(self, bot):
         """Primary selector works on first try, returns True."""
         mock_el = _make_mock_element()
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.return_value = mock_el
             result = bot.smart_wait_and_click("by", "value")
 
@@ -559,7 +562,7 @@ class TestSmartWaitAndClick:
     def test_smart_wait_and_click_backup_success(self, bot):
         """Primary fails (TimeoutException), backup selector works."""
         mock_el = _make_mock_element()
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.side_effect = [
                 TimeoutException("primary failed"),
                 mock_el,
@@ -573,7 +576,7 @@ class TestSmartWaitAndClick:
 
     def test_smart_wait_and_click_all_fail(self, bot):
         """All selectors (primary + backups) fail, returns False."""
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.side_effect = TimeoutException("fail")
             result = bot.smart_wait_and_click(
                 "by", "value",
@@ -584,7 +587,7 @@ class TestSmartWaitAndClick:
 
     def test_smart_wait_and_click_no_backups(self, bot):
         """Only primary selector, fails, returns False."""
-        with patch("mobile.damai_app.WebDriverWait") as MockWait:
+        with patch("mobile.ui_primitives.WebDriverWait") as MockWait:
             MockWait.return_value.until.side_effect = TimeoutException("fail")
             result = bot.smart_wait_and_click("by", "value")
 
@@ -3103,13 +3106,13 @@ class TestClickHelpers:
 
 class TestSmartWaitForElement:
     def test_returns_true_on_primary_found(self, bot):
-        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+        with patch("mobile.ui_primitives.WebDriverWait") as mock_wdw:
             mock_wdw.return_value.until.return_value = Mock()
             result = bot.smart_wait_for_element(By.ID, "some_id")
         assert result is True
 
     def test_returns_false_when_all_timeout(self, bot):
-        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+        with patch("mobile.ui_primitives.WebDriverWait") as mock_wdw:
             mock_wdw.return_value.until.side_effect = TimeoutException()
             result = bot.smart_wait_for_element(
                 By.ID, "primary_id",
@@ -3124,7 +3127,7 @@ class TestSmartWaitForElement:
             if call_count[0] == 1:
                 raise TimeoutException()
             return Mock()
-        with patch("mobile.damai_app.WebDriverWait") as mock_wdw:
+        with patch("mobile.ui_primitives.WebDriverWait") as mock_wdw:
             mock_wdw.return_value.until.side_effect = until_side_effect
             result = bot.smart_wait_for_element(
                 By.ID, "primary_id",
