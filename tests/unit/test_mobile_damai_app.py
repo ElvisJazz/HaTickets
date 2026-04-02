@@ -1607,7 +1607,7 @@ class TestPageStateHelpers:
 
     def test_probe_current_page_detects_pending_order_dialog(self, bot):
         present = {
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付订单")'),
+            (By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn"),
         }
 
         with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
@@ -1622,7 +1622,7 @@ class TestPageStateHelpers:
             (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
             (By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"),
             (By.ID, "layout_num"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (By.ID, "cn.damai:id/checkbox"),
         }
 
         with patch.object(bot, "_has_element", side_effect=lambda by, value: (by, value) in present), \
@@ -3410,35 +3410,8 @@ class TestWarmValidationPipeline:
 # Fast Back to Detail Page
 # ---------------------------------------------------------------------------
 
-class TestProbeRecoveryState:
-    """Tests for _probe_recovery_state — lightweight recovery probe."""
-
-    def test_detects_detail_page(self, bot):
-        def fake_has_element(by, value):
-            return value == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
-        with patch.object(bot, "_has_element", side_effect=fake_has_element):
-            result = bot._probe_recovery_state()
-        assert result["state"] == "detail_page"
-        assert result["purchase_button"] is True
-
-    def test_detects_sku_page(self, bot):
-        def fake_has_element(by, value):
-            return value == "cn.damai:id/layout_sku"
-        with patch.object(bot, "_has_element", side_effect=fake_has_element):
-            result = bot._probe_recovery_state()
-        assert result["state"] == "sku_page"
-
-    def test_detects_sku_page_via_container(self, bot):
-        def fake_has_element(by, value):
-            return value == "cn.damai:id/sku_contanier"
-        with patch.object(bot, "_has_element", side_effect=fake_has_element):
-            result = bot._probe_recovery_state()
-        assert result["state"] == "sku_page"
-
-    def test_returns_unknown_when_no_match(self, bot):
-        with patch.object(bot, "_has_element", return_value=False):
-            result = bot._probe_recovery_state()
-        assert result["state"] == "unknown"
+class TestRecoverToDetailPage:
+    """Tests for _recover_to_detail_page_for_local_retry."""
 
     def test_recover_uses_fast_probe_in_back_loop(self, bot):
         """Back-navigation loop should use probe_current_page(fast=True)."""

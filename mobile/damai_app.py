@@ -1814,27 +1814,6 @@ class DamaiBot:
 
         return self.probe_current_page()
 
-    def _probe_recovery_state(self):
-        """Lightweight page probe for recovery: only check detail/sku/confirm states.
-
-        Uses 2-3 element lookups (~240-360ms) instead of the full
-        probe_current_page which does 12+ lookups (~1.5s).
-        """
-        # Check detail_page first (most common recovery target).
-        if self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"):
-            return {"state": "detail_page", "purchase_button": True, "price_container": False,
-                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                    "pending_order_dialog": False}
-        # Check sku_page (one back away from detail).
-        if self._has_element(By.ID, "cn.damai:id/layout_sku") or \
-                self._has_element(By.ID, "cn.damai:id/sku_contanier"):
-            return {"state": "sku_page", "purchase_button": False, "price_container": True,
-                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                    "pending_order_dialog": False}
-        return {"state": "unknown", "purchase_button": False, "price_container": False,
-                "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                "pending_order_dialog": False}
-
     def _recover_to_detail_page_for_local_retry(self, initial_probe=None, max_back_steps=8, back_delay=0.15):
         """Recover locally to the current event detail/sku page without rebuilding the Appium session."""
         # Delegate to RecoveryHelper if available
@@ -3037,13 +3016,9 @@ class DamaiBot:
             self._has_element(By.ID, "cn.damai:id/layout_price") or \
             self._has_element(By.ID, "cn.damai:id/tv_price_name")
         quantity_picker = self._has_element(By.ID, "layout_num")
-        submit_button = self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")')
+        submit_button = self._has_element(By.ID, "cn.damai:id/checkbox")
         pending_order_dialog = self._has_element(
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("未支付订单")',
-        ) or (
-            self._has_element(By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn")
-            and self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("查看订单")')
+            By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn"
         )
         reservation_mode = False
 

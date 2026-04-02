@@ -124,8 +124,37 @@ class PageProbe:
     # ------------------------------------------------------------------
 
     def _probe_full(self) -> Dict[str, Any]:
-        """Probe using element lookups for comprehensive state detection (~1.5s)."""
-        logger.debug("page probe (full): starting element checks")
+        """Probe using Activity + element lookups for comprehensive state detection.
+
+        Strategy: check Activity name first (~5ms) to skip expensive element
+        lookups (~60ms each).  Only fall through to element checks for pages
+        without a distinct Activity (order_confirm, consent_dialog, pending_order).
+        """
+        activity = self.get_current_activity()
+        logger.debug("page probe (full): activity=%s", activity)
+
+        # ------------------------------------------------------------------
+        # Fast path: Activity-based detection with minimal confirmation
+        # ------------------------------------------------------------------
+        if "ProjectDetail" in activity:
+            purchase_bar = self._exists_by_resource_id(
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+            )
+            return _make_result(state="detail_page", purchase_button=purchase_bar)
+
+        if "NcovSku" in activity:
+            return _make_result(state="sku_page", price_container=True, quantity_picker=True)
+
+        if "MainActivity" in activity:
+            return _make_result(state="homepage")
+
+        if "SearchActivity" in activity:
+            return _make_result(state="search_page")
+
+        # ------------------------------------------------------------------
+        # Slow path: element-based detection for ambiguous Activities
+        # ------------------------------------------------------------------
+        logger.debug("page probe (full): activity not matched, starting element checks")
 
         # Check consent dialog first (blocks everything else)
         if self._exists_by_resource_id("cn.damai:id/id_boot_action_agree"):
@@ -144,7 +173,7 @@ class PageProbe:
                 pending_order_dialog=pending,
             )
 
-        # Check SKU page
+        # Check SKU page (fallback for when Activity didn't match)
         sku_layout = self._exists_by_resource_id("cn.damai:id/layout_sku")
         sku_container = self._exists_by_resource_id("cn.damai:id/sku_contanier")
         if sku_layout or sku_container:
@@ -154,7 +183,7 @@ class PageProbe:
                 pending_order_dialog=pending,
             )
 
-        # Check detail page
+        # Check detail page (fallback)
         purchase_bar = self._exists_by_resource_id(
             "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
         )
@@ -168,7 +197,7 @@ class PageProbe:
                 pending_order_dialog=pending,
             )
 
-        # Check homepage
+        # Check homepage (fallback)
         search_header = self._exists_by_resource_id("cn.damai:id/homepage_header_search")
         search_btn = self._exists_by_resource_id(
             "cn.damai:id/pioneer_homepage_header_search_btn"
@@ -176,7 +205,7 @@ class PageProbe:
         if search_header or search_btn:
             return _make_result(state="homepage", pending_order_dialog=pending)
 
-        # Check search page
+        # Check search page (fallback)
         search_input = self._exists_by_resource_id("cn.damai:id/header_search_v2_input")
         if search_input:
             return _make_result(state="search_page", pending_order_dialog=pending)

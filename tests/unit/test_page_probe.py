@@ -148,7 +148,75 @@ class TestTTLCache:
 # ---------------------------------------------------------------------------
 
 class TestFullProbe:
-    """Tests for the full probe mode (element-based detection)."""
+    """Tests for the full probe mode (Activity + element detection)."""
+
+    # --- Activity-based fast path within full probe ---
+
+    def test_detail_page_by_activity_fast_path(self):
+        """Full probe uses Activity shortcut for ProjectDetail, confirms with purchase bar."""
+        device = _make_device("com.damai.ProjectDetailActivity")
+
+        def element_factory(**kwargs):
+            el = Mock()
+            rid = kwargs.get("resourceId", "")
+            if rid == "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl":
+                el.exists = True
+            else:
+                el.exists = False
+            return el
+
+        device.side_effect = element_factory
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "detail_page"
+        assert result["purchase_button"] is True
+
+    def test_sku_page_by_activity_fast_path(self):
+        """Full probe uses Activity shortcut for NcovSku, sets price_container."""
+        device = _make_device("com.damai.NcovSkuActivity")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "sku_page"
+        assert result["price_container"] is True
+        assert result["quantity_picker"] is True
+
+    def test_homepage_by_activity_fast_path(self):
+        """Full probe uses Activity shortcut for MainActivity."""
+        device = _make_device("com.damai.MainActivity")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "homepage"
+
+    def test_search_page_by_activity_fast_path(self):
+        """Full probe uses Activity shortcut for SearchActivity."""
+        device = _make_device("com.damai.SearchActivity")
+        probe = PageProbe(device, cache_ttl_s=0)
+
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "search_page"
+
+    def test_activity_fast_path_skips_element_checks(self):
+        """When Activity matches, element lookups should NOT be called (except confirmation)."""
+        device = _make_device("com.damai.MainActivity")
+        mock_element = Mock()
+        mock_element.exists = False
+        device.return_value = mock_element
+
+        probe = PageProbe(device, cache_ttl_s=0)
+        result = probe.probe_current_page(fast=False)
+
+        assert result["state"] == "homepage"
+        # device() should not have been called for element checks
+        device.assert_not_called()
+
+    # --- Element-based slow path (ambiguous Activity) ---
 
     def test_order_confirm_page_detected_by_submit_button(self):
         """Full probe detects order_confirm_page when '立即提交' text element exists."""
@@ -190,7 +258,7 @@ class TestFullProbe:
         assert result["state"] == "consent_dialog"
 
     def test_sku_page_detected_by_layout(self):
-        """Full probe detects sku_page by layout_sku resource ID."""
+        """Full probe detects sku_page by layout_sku resource ID (element fallback)."""
         device = _make_device("com.damai.SomeActivity")
 
         def element_factory(**kwargs):
@@ -210,7 +278,7 @@ class TestFullProbe:
         assert result["quantity_picker"] is True
 
     def test_homepage_detected_by_search_header(self):
-        """Full probe detects homepage by search header resource ID."""
+        """Full probe detects homepage by search header resource ID (element fallback)."""
         device = _make_device("com.damai.SomeActivity")
 
         def element_factory(**kwargs):
@@ -229,7 +297,7 @@ class TestFullProbe:
         assert result["state"] == "homepage"
 
     def test_detail_page_detected_by_purchase_bar(self):
-        """Full probe detects detail_page by purchase status bar resource ID."""
+        """Full probe detects detail_page by purchase status bar (element fallback)."""
         device = _make_device("com.damai.SomeActivity")
 
         def element_factory(**kwargs):
