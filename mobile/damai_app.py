@@ -1512,12 +1512,20 @@ class DamaiBot(UIPrimitives):
                     burst_count = 1 if not self.config.if_commit_order else 2
                     self._burst_click_coordinates(*buy_button_coords, count=burst_count, interval_ms=25, duration=25)
                 elif self.config.rush_mode:
-                    try:
-                        buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
+                    # Element click may not work on Damai's custom btn_buy_view —
+                    # use coordinate click from XML bounds as primary method.
+                    _buy_coords = self._get_buy_button_coordinates()
+                    if _buy_coords:
                         burst_count = 1 if not self.config.if_commit_order else 2
-                        self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
-                    except Exception:
-                        self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view")
+                        self._burst_click_coordinates(*_buy_coords, count=burst_count, interval_ms=25, duration=25)
+                        buy_button_coords = _buy_coords  # cache for next retry
+                    else:
+                        try:
+                            buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
+                            burst_count = 1 if not self.config.if_commit_order else 2
+                            self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
+                        except Exception:
+                            self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view")
                 else:
                     if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
                         self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
