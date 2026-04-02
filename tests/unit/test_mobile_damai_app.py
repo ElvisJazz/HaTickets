@@ -23,6 +23,38 @@ from mobile.item_resolver import DamaiItemDetail
 # Fixtures
 # ---------------------------------------------------------------------------
 
+def _make_time_side_effect(start=0.0, thereafter=1.5):
+    """Return a time.time() side_effect function that never exhausts.
+
+    First call returns *start*.  Every subsequent call returns *thereafter*.
+    This works for loops where the deadline is computed as ``start + delta``
+    and *thereafter* exceeds that deadline so the loop exits immediately.
+
+    For code paths that cross **multiple** ``while time.time() < deadline``
+    loops (e.g. ultra_fast_click → confirm-purchase retry), use a
+    *thereafter* value large enough to exceed the sum of all timeouts.
+    """
+    calls = {"n": 0}
+    def _fake():
+        calls["n"] += 1
+        return start if calls["n"] == 1 else thereafter
+    return _fake
+
+
+def _make_time_monotonic(start=0.0, step=0.5):
+    """Return a time.time() side_effect that increases by *step* each call.
+
+    Useful when production code creates multiple sequential deadline loops
+    — each call returns ``start + n * step`` so every loop eventually
+    exceeds its deadline.
+    """
+    state = {"t": start - step}
+    def _fake():
+        state["t"] += step
+        return state["t"]
+    return _fake
+
+
 def _make_mock_element(x=100, y=200, width=50, height=40):
     """Helper: create a mock element with a .rect property."""
     el = Mock()
@@ -688,7 +720,7 @@ class TestRunTicketGrabbing:
                  },
              ]), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.3]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.3)
             result = bot.run_ticket_grabbing()
 
         assert result is True
@@ -728,7 +760,7 @@ class TestRunTicketGrabbing:
              }), \
              patch.object(bot, "smart_wait_and_click") as smart_click, \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.run_ticket_grabbing()
 
         assert result is True
@@ -748,7 +780,7 @@ class TestRunTicketGrabbing:
                  "submit_button": False,
              }), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.run_ticket_grabbing()
 
         assert result is True
@@ -787,7 +819,7 @@ class TestRunTicketGrabbing:
              }), \
              patch.object(bot, "smart_wait_and_click") as smart_click, \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.run_ticket_grabbing()
 
         assert result is True
@@ -815,7 +847,8 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "_submit_order_fast", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
+            # Provide enough time.time() values for the confirm-retry loop
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.5)
             # Mock find_element for price container + target_price
             mock_price_container = Mock()
             mock_target = _make_mock_element()
@@ -854,7 +887,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.9]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.9)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -866,7 +899,7 @@ class TestRunTicketGrabbing:
         assert result is True
         enter_purchase_flow.assert_called_once_with(prepared=False)
         select_price.assert_called_once_with(cached_coords=(240, 1560))
-        burst_click_coords.assert_called_once_with(320, 1880, count=1, interval_ms=25, duration=25)
+        burst_click_coords.assert_called_with(320, 1880, count=1, interval_ms=25, duration=25)
 
     def test_run_ticket_grabbing_stops_before_submit_when_commit_disabled(self, bot):
         """if_commit_order=False waits for confirm page but never clicks submit."""
@@ -892,7 +925,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.2]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.2)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -928,7 +961,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.8]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.8)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -960,7 +993,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.8]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.8)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -1045,7 +1078,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click", return_value=0), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.return_value = 0.0
+            mock_time.time.side_effect = _make_time_monotonic(0.0, 2.0)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -1128,7 +1161,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "_submit_order_fast", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 2.0]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 2.0)
             # find_element raises for price container, triggering wait.until backup
             bot.driver.find_element.side_effect = NoSuchElementException("not found")
             bot.wait.until = Mock(return_value=mock_price_container)
@@ -1180,7 +1213,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "_submit_order_fast", return_value="timeout") as submit_fast, \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.0]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.0)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -1216,7 +1249,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "_submit_order_fast", return_value="existing_order"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.0]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.0)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -1277,7 +1310,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.0]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.0)
             bot.driver.find_elements.return_value = []
 
             result = bot.run_ticket_grabbing()
@@ -1323,7 +1356,7 @@ class TestRunTicketGrabbing:
              patch.object(bot, "ultra_fast_click", return_value=True), \
              patch.object(bot, "ultra_batch_click") as batch_click, \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.8]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.8)
             mock_price_container = Mock()
             mock_target = _make_mock_element()
             mock_price_container.find_element.return_value = mock_target
@@ -2199,7 +2232,7 @@ class TestVerifyOrderResult:
         """Activity contains 'Pay', returns 'success'."""
         with patch.object(bot, "_get_current_activity", return_value="com.alipay.android.app.PayActivity"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.verify_order_result(timeout=5)
 
         assert result == "success"
@@ -2212,7 +2245,7 @@ class TestVerifyOrderResult:
         with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
              patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.verify_order_result(timeout=5)
 
         assert result == "success"
@@ -2268,7 +2301,7 @@ class TestVerifyOrderResult:
         with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
              patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.verify_order_result(timeout=5)
 
         assert result == "sold_out"
@@ -2306,7 +2339,7 @@ class TestVerifyOrderResult:
         with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
              patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.verify_order_result(timeout=5)
 
         assert result == "captcha"
@@ -2327,7 +2360,7 @@ class TestVerifyOrderResult:
         with patch.object(bot, "_get_current_activity", return_value="SomeActivity"), \
              patch.object(bot, "_has_element", side_effect=has_element_side_effect), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 0.1]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 0.1)
             result = bot.verify_order_result(timeout=5)
 
         assert result == "existing_order"
@@ -2839,7 +2872,7 @@ class TestPriceSelection:
              patch.object(bot, "ultra_batch_click"), \
              patch.object(bot, "_submit_order_fast", return_value="success"), \
              patch("mobile.damai_app.time") as mock_time:
-            mock_time.time.side_effect = [0.0, 1.5]
+            mock_time.time.side_effect = _make_time_side_effect(0.0, 1.5)
             bot.driver.find_elements.return_value = []
 
             result = bot.run_ticket_grabbing()
@@ -2890,7 +2923,7 @@ class TestPriceSelection:
                  patch.object(bot, "ultra_batch_click"), \
                  patch.object(bot, "_submit_order_fast", return_value="success"), \
                  patch("mobile.damai_app.time") as mock_time:
-                mock_time.time.side_effect = [0.0, 1.5]
+                mock_time.time.side_effect = _make_time_side_effect(0.0, 1.5)
                 # Mock price container for index-based fallback
                 mock_price_container = Mock()
                 mock_target = _make_mock_element()

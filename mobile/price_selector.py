@@ -241,8 +241,17 @@ class PriceSelector:
         return False
 
     def _click_price_option_by_config_index(self, burst=False, coords=None):
-        """Click the configured price card index directly without reading ticket texts."""
+        """Click the configured price card index directly without reading ticket texts.
+
+        Prefers element-based click (works with Damai's custom Views that
+        ignore raw touch coordinates) and falls back to coordinate click.
+        """
         bot = self._bot
+        # Primary: element click — Damai price cards may not respond to coordinate taps
+        if self._click_price_card_element(self._config.price_index):
+            logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
+            return True
+        # Fallback: coordinate click
         target_coords = coords or bot._get_price_option_coordinates_by_config_index()
         if not target_coords:
             return False
@@ -252,6 +261,24 @@ class PriceSelector:
             bot._click_coordinates(*target_coords, duration=30)
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
         return True
+
+    def _click_price_card_element(self, index):
+        """Click price card by element (Accessibility) rather than coordinate.
+
+        Some Damai App custom Views only respond to Accessibility clicks,
+        not raw touch coordinates.
+        """
+        try:
+            container = self._d(resourceId="cn.damai:id/project_detail_perform_price_flowlayout")
+            if not container.exists:
+                return False
+            children = container.child(className="android.widget.FrameLayout", clickable=True)
+            if children.count > index:
+                children[index].click()
+                return True
+        except Exception:
+            pass
+        return False
 
     def _build_compound_price_text(self, container):
         """Build a human-readable price string from split price fields."""

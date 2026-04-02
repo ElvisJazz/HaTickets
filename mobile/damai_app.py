@@ -1501,31 +1501,35 @@ class DamaiBot(UIPrimitives):
             #     for i in range(len(self.config.users) - 1):
             #         self.driver.find_element(by=By.ID, value='img_jia').click()
 
-            # 5. 确定购买
+            # 5. 确定购买 — retry clicking until confirm page appears
             logger.info("确定购买...")
-            if self.config.rush_mode and buy_button_coords:
-                burst_count = 1 if not self.config.if_commit_order else 2
-                self._burst_click_coordinates(*buy_button_coords, count=burst_count, interval_ms=25, duration=25)
-                buy_clicked = True
-            elif self.config.rush_mode:
-                try:
-                    buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
+            submit_ready = False
+            confirm_deadline = time.time() + (4.0 if self.config.rush_mode else 1.8)
+            confirm_attempt = 0
+            while time.time() < confirm_deadline and not submit_ready:
+                confirm_attempt += 1
+                if self.config.rush_mode and buy_button_coords:
                     burst_count = 1 if not self.config.if_commit_order else 2
-                    self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
-                    buy_clicked = True
-                except Exception:
-                    buy_clicked = False
-            else:
-                buy_clicked = False
-
-            if not buy_clicked and not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
-                # 备用按钮文本
-                self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
-
-            submit_ready = self._wait_for_submit_ready(
-                timeout=4.0 if self.config.rush_mode else 1.8,
-                poll_interval=0.03 if self.config.rush_mode else 0.05,
-            )
+                    self._burst_click_coordinates(*buy_button_coords, count=burst_count, interval_ms=25, duration=25)
+                elif self.config.rush_mode:
+                    try:
+                        buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
+                        burst_count = 1 if not self.config.if_commit_order else 2
+                        self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
+                    except Exception:
+                        self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view")
+                else:
+                    if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
+                        self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
+                # Short wait then check if confirm page appeared
+                remaining = confirm_deadline - time.time()
+                check_timeout = min(1.0, max(0.1, remaining))
+                submit_ready = self._wait_for_submit_ready(
+                    timeout=check_timeout,
+                    poll_interval=0.03 if self.config.rush_mode else 0.05,
+                )
+                if not submit_ready and confirm_attempt < 5:
+                    logger.debug(f"确定按钮第 {confirm_attempt} 次点击未生效，重试...")
             if not submit_ready:
                 if self.config.rush_mode and not self.config.if_commit_order:
                     logger.info("开发验证极速路径：确认页未完全就绪，跳过预选用户兜底，直接校验观演人区域")
