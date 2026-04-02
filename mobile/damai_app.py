@@ -108,6 +108,8 @@ class DamaiBot:
             self._page_probe = PageProbe(self.d, self.config)
             self._guard = BuyButtonGuard(self.d)
             self._pipeline = FastPipeline(self.d, self.config, self._page_probe, self._guard)
+            # Share coordinate cache with pipeline
+            self._pipeline._cached_coords = self._cached_hot_path_coords
             self._navigator = EventNavigator(self.d, self.config, self._page_probe)
             self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
             self._price_sel = PriceSelector(self.d, self.config, self._page_probe)
@@ -1833,6 +1835,14 @@ class DamaiBot:
 
     def _recover_to_detail_page_for_local_retry(self, initial_probe=None, max_back_steps=8, back_delay=0.15):
         """Recover locally to the current event detail/sku page without rebuilding the Appium session."""
+        # Delegate to RecoveryHelper if available
+        if hasattr(self, '_recovery') and initial_probe is None:
+            result = self._recovery.recover_to_detail_page()
+            if result["state"] in {"detail_page", "sku_page"}:
+                return result
+            # Fall through to existing logic if recovery failed
+
+        # Original logic below (unchanged)
         current_probe = initial_probe or self.probe_current_page(fast=True)
         retryable_states = {"detail_page", "sku_page"}
 
@@ -3078,6 +3088,8 @@ class DamaiBot:
 
     def _has_warm_pipeline_coords(self):
         """Check if all coordinates required for the blind pipeline are cached."""
+        if hasattr(self, '_pipeline'):
+            return self._pipeline.has_warm_coords()
         c = self._cached_hot_path_coords
         return all([
             c.get("detail_buy"),
