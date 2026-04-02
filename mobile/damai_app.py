@@ -1501,11 +1501,9 @@ class DamaiBot(UIPrimitives):
             #     for i in range(len(self.config.users) - 1):
             #         self.driver.find_element(by=By.ID, value='img_jia').click()
 
-            # 5. 确定购买 — retry clicking until confirm page appears
-            # Brief pause after price selection to let the App update btn_buy_view state.
-            # Without this, coordinate clicks on the confirm button may be ignored because
-            # the App is still animating the price selection transition.
-            time.sleep(0.3)
+            # 5. 确定购买 — brief wait for price selection to register.
+            # Damai App ignores confirm clicks until btn_buy_view becomes clickable (price > 0).
+            time.sleep(0.5)
             logger.info("确定购买...")
             submit_ready = False
             confirm_deadline = time.time() + (4.0 if self.config.rush_mode else 1.8)
