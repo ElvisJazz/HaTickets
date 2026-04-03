@@ -28,6 +28,8 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+bugs/
+plans/
 
 # Test / Coverage
 .coverage
