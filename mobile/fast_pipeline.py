@@ -14,29 +14,38 @@ from typing import Callable, List, Optional, Tuple
 from selenium.webdriver.common.by import By
 
 try:
+    from mobile.ui_primitives import ANDROID_UIAUTOMATOR
+except ImportError:
+    pass
+
+try:
     from mobile.logger import get_logger
 except ImportError:
     from logger import get_logger
 
 logger = get_logger(__name__)
 
-_PIPELINE_DEADLINE_S = 5.0
+_PIPELINE_DEADLINE_S = 8.0
 
 # Keys that must all exist in _cached_coords for a warm run.
-_WARM_REQUIRED_KEYS = frozenset({
-    "detail_buy",
-    "price",
-    "sku_buy",
-    "attendee_checkboxes",
-})
+_WARM_REQUIRED_KEYS = frozenset(
+    {
+        "detail_buy",
+        "price",
+        "sku_buy",
+        "attendee_checkboxes",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
 
-def poll_until(condition_fn: Callable[[], bool], deadline: float,
-               interval_s: float = 0.05) -> bool:
+
+def poll_until(
+    condition_fn: Callable[[], bool], deadline: float, interval_s: float = 0.05
+) -> bool:
     """Poll *condition_fn* until it returns True or *deadline* is exceeded.
 
     Returns True if the condition was met before the deadline, False otherwise.
@@ -60,6 +69,7 @@ def batch_shell_taps(device, coordinates: List[Tuple[int, int]]) -> None:
 # FastPipeline
 # ---------------------------------------------------------------------------
 
+
 class FastPipeline:
     """Coordinate-driven pipeline with a single global deadline."""
 
@@ -76,6 +86,112 @@ class FastPipeline:
     def set_bot(self, bot) -> None:
         """Set DamaiBot reference for delegation."""
         self._bot = bot
+
+    def _confirm_page_ready(self) -> bool:
+        """Detect confirm-page readiness with lighter-weight fallbacks."""
+        bot = self._bot
+        if bot._has_element(By.ID, "cn.damai:id/checkbox"):
+            return True
+        if bot._attendee_checkbox_elements():
+            return True
+
+        confirm_selectors = [
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textContains("确认购买")',
+            ),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textContains("实名观演人")',
+            ),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textContains("立即提交")',
+            ),
+        ]
+        return any(bot._has_element(by, value) for by, value in confirm_selectors)
+
+    def _wait_for_purchase_entry(self, deadline: float):
+        """Wait briefly for detail CTA to advance into SKU or confirm page."""
+        bot = self._bot
+        remaining = max(0.0, deadline - time.time())
+        if remaining <= 0:
+            return None
+        timeout = min(0.45, remaining)
+        return bot._wait_for_purchase_entry_result(
+            timeout=timeout,
+            poll_interval=0.03,
+            fallback_probe_on_timeout=False,
+        )
+
+    def _wait_for_confirm_ready(
+        self, deadline: float, poll_window_s: float = 0.22
+    ) -> bool:
+        """Poll briefly for the confirm page without triggering heavier probes."""
+        poll_end = min(time.time() + poll_window_s, deadline)
+        while time.time() < poll_end:
+            if self._confirm_page_ready():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def _open_purchase_panel(self, detail_buy_coords, deadline: float):
+        """Leave detail_page using shell double-tap first, then u2 click fallback."""
+        bot = self._bot
+        if not detail_buy_coords or time.time() >= deadline:
+            return False
+
+        batch_shell_taps(self._device, [detail_buy_coords, detail_buy_coords])
+        entry_probe = self._wait_for_purchase_entry(deadline)
+        if entry_probe:
+            return entry_probe
+
+        if time.time() >= deadline:
+            return None
+        bot._click_coordinates(*detail_buy_coords, duration=25)
+        return self._wait_for_purchase_entry(deadline)
+
+    def _select_price_with_pipeline(self, price_coords) -> bool:
+        """Select the configured price using the same robust path as normal flow."""
+        bot = self._bot
+        return bool(bot._click_price_option_by_config_index(coords=price_coords))
+
+    def _click_sku_buy_with_pipeline(self, sku_buy_coords) -> bool:
+        """Click SKU buy/confirm button with element-first fallback."""
+        bot = self._bot
+        burst_count = 1 if not self._config.if_commit_order else 2
+        if bot._click_sku_buy_button_element(burst_count=burst_count):
+            return True
+        if sku_buy_coords:
+            bot._burst_click_coordinates(
+                *sku_buy_coords,
+                count=burst_count,
+                interval_ms=25,
+                duration=25,
+            )
+            return True
+        return False
+
+    def _shell_price_and_buy_until_confirm(
+        self, price_coords, sku_buy_coords, deadline: float
+    ) -> bool:
+        """Fast-path SKU selection using raw shell taps before element fallbacks."""
+        if (
+            not price_coords
+            or not sku_buy_coords
+            or time.time() >= deadline
+        ):
+            return False
+
+        shell_deadline = min(deadline, time.time() + 0.9)
+        while time.time() < shell_deadline:
+            batch_shell_taps(
+                self._device,
+                [price_coords, sku_buy_coords, sku_buy_coords],
+            )
+            if self._wait_for_confirm_ready(shell_deadline):
+                return True
+        return False
 
     # -- Public helpers -----------------------------------------------------
 
@@ -223,6 +339,7 @@ class FastPipeline:
         Returns (buy_clicked: bool).
         """
         bot = self._bot
+        bot._dismiss_fast_blocking_dialogs()
         xml_root = bot._dump_hierarchy_xml()
         if xml_root is None:
             return False
@@ -244,11 +361,21 @@ class FastPipeline:
                 buy_coords = bot._extract_coords_from_xml_node(node)
 
             # City match
-            if not city_coords and self._config.city and text and self._config.city in text:
+            if (
+                not city_coords
+                and self._config.city
+                and text
+                and self._config.city in text
+            ):
                 city_coords = bot._extract_coords_from_xml_node(node)
 
             # Date match
-            if not date_coords and self._config.date and text and self._config.date in text:
+            if (
+                not date_coords
+                and self._config.date
+                and text
+                and self._config.date in text
+            ):
                 date_coords = bot._extract_coords_from_xml_node(node)
 
         # --- Cache coords and batch-click via shell ---
@@ -271,11 +398,10 @@ class FastPipeline:
             self._cached_coords["detail_buy"] = buy_coords
             logger.info("点击购票按钮...")
             tap_cmds.append(f"input tap {int(buy_coords[0])} {int(buy_coords[1])}")
-            self._device.shell("; ".join(tap_cmds))
-            return True
-
+            tap_cmds.append(f"input tap {int(buy_coords[0])} {int(buy_coords[1])}")
         if tap_cmds:
             self._device.shell("; ".join(tap_cmds))
+            return bool(buy_coords)
         return False
 
     def run_cold_validation(self, start_time):
@@ -289,25 +415,29 @@ class FastPipeline:
         if not self.rush_preselect_and_buy_via_xml():
             return None
 
-        # --- Phase 2: poll for SKU page ---
-        logger.info("选择票价...")
         global_deadline = start_time + _PIPELINE_DEADLINE_S
-        sku_detected = False
-        while time.time() < global_deadline:
-            if bot._has_element(By.ID, "cn.damai:id/layout_sku"):
-                sku_detected = True
-                break
-        if not sku_detected:
-            # May have jumped straight to confirm page (e.g. single-price event).
-            if bot._has_element(By.ID, "cn.damai:id/checkbox"):
-                return self._finish_confirm(start_time)
+        entry_probe = self._wait_for_purchase_entry(global_deadline)
+        if not entry_probe:
+            detail_buy = self._cached_coords.get("detail_buy")
+            if detail_buy:
+                self._bot._click_coordinates(*detail_buy, duration=25)
+                entry_probe = self._wait_for_purchase_entry(global_deadline)
+        if not entry_probe:
+            return None
+
+        if entry_probe["state"] == "order_confirm_page" or self._confirm_page_ready():
+            return self._finish_confirm(start_time)
+
+        if entry_probe["state"] != "sku_page":
             return None
 
         # --- Phase 3: SKU page --- single XML dump for price + sku_buy coords ---
         sku_xml = bot._dump_hierarchy_xml()
         if sku_xml is None:
             return None
-        price_coords = bot._get_price_option_coordinates_by_config_index(xml_root=sku_xml)
+        price_coords = bot._get_price_option_coordinates_by_config_index(
+            xml_root=sku_xml
+        )
         sku_buy_coords = bot._get_buy_button_coordinates(xml_root=sku_xml)
         if not price_coords or not sku_buy_coords:
             return None
@@ -316,44 +446,40 @@ class FastPipeline:
         self._cached_coords["price"] = price_coords
         self._cached_coords["sku_buy"] = sku_buy_coords
 
+        logger.info("选择票价...")
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
         logger.info("选择数量...")
         logger.info("确定购买...")
 
-        # --- Phase 4: shell batch price + buy, concurrent poll for confirm ---
-        px, py = int(price_coords[0]), int(price_coords[1])
-        bx, by = int(sku_buy_coords[0]), int(sku_buy_coords[1])
-        # Fire the initial price + buy clicks via shell.
-        self._device.shell(f"input tap {px} {py}; input tap {bx} {by}")
+        # --- Phase 4: shell fast path, then element-based fallbacks ---
+        confirmed = self._shell_price_and_buy_until_confirm(
+            price_coords,
+            sku_buy_coords,
+            global_deadline,
+        )
+        sold_out_checked = False
+        if not confirmed:
+            if not self._select_price_with_pipeline(price_coords):
+                return None
 
-        # Background blind clicker keeps retrying in case the first tap was too early.
-        stop_event = threading.Event()
-        tap_cmd = f"input tap {px} {py}; input tap {bx} {by}"
+            while time.time() < global_deadline:
+                if not self._click_sku_buy_with_pipeline(sku_buy_coords):
+                    return None
 
-        def _blind_click_loop():
-            while not stop_event.is_set():
-                try:
-                    self._device.shell(tap_cmd)
-                except Exception:
-                    pass
-                if stop_event.wait(timeout=0.02):
+                if self._wait_for_confirm_ready(global_deadline, poll_window_s=0.55):
+                    confirmed = True
                     break
 
-        clicker = threading.Thread(target=_blind_click_loop, daemon=True)
-        clicker.start()
-
-        confirmed = False
-        while time.time() < global_deadline:
-            if bot._has_element(By.ID, "cn.damai:id/checkbox"):
-                confirmed = True
-                break
-
-        stop_event.set()
-        clicker.join(timeout=0.5)
-        # Ensure blind clicker is fully dead — lingering taps can toggle price selection
-        if clicker.is_alive():
-            logger.warning("Blind clicker thread still alive after join, waiting extra")
-            time.sleep(0.5)
+                # Check for sold-out once midway to avoid wasting the full deadline.
+                if (
+                    not sold_out_checked
+                    and time.time() > start_time + _PIPELINE_DEADLINE_S * 0.5
+                ):
+                    sold_out_checked = True
+                    if bot._is_buy_button_sold_out():
+                        logger.warning("购买按钮区域检测到缺货/售罄标识，管道提前退出")
+                        bot._set_terminal_failure("sold_out")
+                        return False
 
         if not confirmed:
             return None
@@ -385,8 +511,10 @@ class FastPipeline:
                 bot._click_attendee_checkbox_fast(checkbox)
 
         bot._set_run_outcome("validation_ready")
-        logger.info("if_commit_order=False，已完成观演人勾选，停止在\"立即提交\"前")
-        logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒")
+        logger.info('if_commit_order=False，已完成观演人勾选，停止在"立即提交"前')
+        logger.info(
+            f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒"
+        )
         return True
 
     def run_warm_validation(self, start_time):
@@ -402,57 +530,61 @@ class FastPipeline:
         price = coords["price"]
         sku_buy = coords["sku_buy"]
         attendees = coords["attendee_checkboxes"]
+        date = coords.get("date")
         city = coords.get("city")
         required_count = max(1, len(self._config.users or []))
 
-        # --- Step 1: city preselect + detail_buy via batched shell --------
+        # --- Step 1: apply cached filters, then enter purchase panel --------
         tap_cmds = []
+        if date and "date" not in no_match:
+            tap_cmds.append(f"input tap {int(date[0])} {int(date[1])}")
+            logger.info(f"极速模式预选日期: {self._config.date}")
         if city and "city" not in no_match:
             tap_cmds.append(f"input tap {int(city[0])} {int(city[1])}")
             logger.info(f"极速模式预选城市: {self._config.city}")
-        logger.info("点击购票按钮...")
-        tap_cmds.append(f"input tap {int(detail_buy[0])} {int(detail_buy[1])}")
+        tap_cmds.extend(
+            [
+                f"input tap {int(detail_buy[0])} {int(detail_buy[1])}",
+                f"input tap {int(detail_buy[0])} {int(detail_buy[1])}",
+            ]
+        )
         self._device.shell("; ".join(tap_cmds))
+        logger.info("点击购票按钮...")
+        deadline = start_time + _PIPELINE_DEADLINE_S
+        entry_probe = self._wait_for_purchase_entry(deadline)
+        if not entry_probe:
+            self._bot._click_coordinates(*detail_buy, duration=25)
+            entry_probe = self._wait_for_purchase_entry(deadline)
+        if not entry_probe:
+            return None
+        if entry_probe["state"] == "order_confirm_page" or self._confirm_page_ready():
+            entry_probe = {"state": "order_confirm_page"}
+        elif entry_probe["state"] != "sku_page":
+            return None
 
-        # --- Step 2: background blind clicker ----------------------------
-        stop_event = threading.Event()
-        px, py = int(price[0]), int(price[1])
-        bx, by = int(sku_buy[0]), int(sku_buy[1])
-        tap_cmd = f"input tap {px} {py}; input tap {bx} {by}"
-
-        def _blind_click_loop():
-            while not stop_event.is_set():
-                try:
-                    self._device.shell(tap_cmd)
-                except Exception:
-                    pass
-                if stop_event.wait(timeout=0.02):
-                    break
-
-        clicker = threading.Thread(target=_blind_click_loop, daemon=True)
-        clicker.start()
-
-        # --- Step 3: main thread polls for confirm page ------------------
+        # --- Step 2: select price + click buy, poll for confirm ---
         logger.info("选择票价...")
         logger.info(f"通过配置索引直接选择票价: price_index={self._config.price_index}")
         logger.info("选择数量...")
         logger.info("确定购买...")
 
         confirmed = False
-        deadline = start_time + _PIPELINE_DEADLINE_S
-        while time.time() < deadline:
-            if bot._has_element(By.ID, "cn.damai:id/checkbox"):
-                confirmed = True
-                break
+        if entry_probe["state"] == "sku_page":
+            confirmed = self._shell_price_and_buy_until_confirm(price, sku_buy, deadline)
+            if not confirmed and not self._select_price_with_pipeline(price):
+                return None
+            while (
+                time.time() < deadline
+                and entry_probe["state"] == "sku_page"
+                and not confirmed
+            ):
+                if not self._click_sku_buy_with_pipeline(sku_buy):
+                    return None
+                if self._wait_for_confirm_ready(deadline, poll_window_s=0.55):
+                    confirmed = True
+                    break
 
-        stop_event.set()
-        clicker.join(timeout=0.5)
-        # Ensure blind clicker is fully dead — lingering taps can toggle price selection
-        if clicker.is_alive():
-            logger.warning("Blind clicker thread still alive after join, waiting extra")
-            time.sleep(0.5)
-
-        if not confirmed:
+        if entry_probe["state"] == "sku_page" and not confirmed:
             return None
 
         # --- Step 4: click attendees -------------------------------------
@@ -462,6 +594,8 @@ class FastPipeline:
             bot._click_coordinates(*c)
 
         bot._set_run_outcome("validation_ready")
-        logger.info("if_commit_order=False，已完成观演人勾选，停止在\"立即提交\"前")
-        logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒")
+        logger.info('if_commit_order=False，已完成观演人勾选，停止在"立即提交"前')
+        logger.info(
+            f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒"
+        )
         return True

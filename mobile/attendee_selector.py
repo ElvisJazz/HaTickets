@@ -1,12 +1,14 @@
 """AttendeeSelector — confirm page attendee checkbox automation."""
+
 from __future__ import annotations
 
 import re
 import time
-from typing import List, Optional
+from typing import List
 
-from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.common.by import By
+
+from mobile.ui_primitives import ANDROID_UIAUTOMATOR
 
 from mobile.logger import get_logger
 
@@ -32,7 +34,7 @@ class AttendeeSelector:
         """Infer how many attendees must be selected on the confirm page."""
         hint_text = self._bot._safe_element_text(
             self._bot.driver,
-            AppiumBy.ANDROID_UIAUTOMATOR,
+            ANDROID_UIAUTOMATOR,
             'new UiSelector().textContains("仅需选择")',
         )
         match = re.search(r"仅需选择\s*(\d+)\s*位", hint_text or "")
@@ -49,9 +51,12 @@ class AttendeeSelector:
     @staticmethod
     def _is_checkbox_selected(checkbox):
         from mobile.ui_primitives import UIPrimitives
+
         return UIPrimitives._is_checked(checkbox)
 
-    def _attendee_selected_count(self, checkbox_elements=None, use_source_fallback=True):
+    def _attendee_selected_count(
+        self, checkbox_elements=None, use_source_fallback=True
+    ):
         """Count selected attendee checkboxes, with XML fallback for flaky checked attrs."""
         if checkbox_elements is not None:
             elements = checkbox_elements
@@ -59,10 +64,14 @@ class AttendeeSelector:
             elements = self._bot._attendee_checkbox_elements()
         else:
             elements = self._attendee_checkbox_elements()
-        selected_count = sum(1 for checkbox in elements if self._is_checkbox_selected(checkbox))
+        selected_count = sum(
+            1 for checkbox in elements if self._is_checkbox_selected(checkbox)
+        )
         if selected_count > 0:
             return selected_count
-        if (self._config.rush_mode and not self._config.if_commit_order) and not use_source_fallback:
+        if (
+            self._config.rush_mode and not self._config.if_commit_order
+        ) and not use_source_fallback:
             return selected_count
 
         try:
@@ -91,7 +100,9 @@ class AttendeeSelector:
         click_actions = [
             lambda: bot._click_element_center(checkbox, duration=35),
             lambda: checkbox.click(),
-            lambda: bot._burst_click_element_center(checkbox, count=2, interval_ms=30, duration=30),
+            lambda: bot._burst_click_element_center(
+                checkbox, count=2, interval_ms=30, duration=30
+            ),
         ]
 
         for action in click_actions:
@@ -102,7 +113,10 @@ class AttendeeSelector:
             time.sleep(0.05)
             if bot._is_checkbox_selected(checkbox):
                 return True
-            if bot._attendee_selected_count(use_source_fallback=use_fallback) > before_selected:
+            if (
+                bot._attendee_selected_count(use_source_fallback=use_fallback)
+                > before_selected
+            ):
                 return True
         return False
 
@@ -150,7 +164,9 @@ class AttendeeSelector:
                     return True
         return False
 
-    def _ensure_attendees_selected_on_confirm_page(self, require_attendee_section=False):
+    def _ensure_attendees_selected_on_confirm_page(
+        self, require_attendee_section=False
+    ):
         """Make sure required attendee checkboxes are selected before submit.
 
         NOTE: internal calls go through ``self._bot`` so that test-level patches
@@ -163,13 +179,22 @@ class AttendeeSelector:
         if self._config.rush_mode and not self._config.if_commit_order:
             cached_coords = bot._cached_hot_path_coords.get("attendee_checkboxes")
             if cached_coords:
-                logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
+                logger.info(
+                    f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）"
+                )
                 logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
                 for coords in cached_coords[:required_count]:
                     bot._click_coordinates(*coords)
                 return True
 
-            checkbox_elements = bot._attendee_checkbox_elements()
+            # Poll for checkbox elements — confirm page may still be rendering.
+            checkbox_elements = []
+            poll_deadline = time.time() + 3.0
+            while time.time() < poll_deadline:
+                checkbox_elements = bot._attendee_checkbox_elements()
+                if checkbox_elements:
+                    break
+                time.sleep(0.05)
             if not checkbox_elements:
                 return not require_attendee_section
 
@@ -185,18 +210,24 @@ class AttendeeSelector:
             if _coords:
                 bot._cached_hot_path_coords["attendee_checkboxes"] = _coords
 
-            selected_count = bot._attendee_selected_count(checkbox_elements, use_source_fallback=False)
+            selected_count = bot._attendee_selected_count(
+                checkbox_elements, use_source_fallback=False
+            )
             if selected_count >= required_count:
                 return True
 
-            logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
+            logger.info(
+                f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）"
+            )
             logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
             clicked_count = 0
             for checkbox in checkbox_elements[:required_count]:
                 if bot._click_attendee_checkbox_fast(checkbox):
                     clicked_count += 1
             if clicked_count < required_count:
-                logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {clicked_count} 位）")
+                logger.warning(
+                    f"观演人选择不足（需要 {required_count} 位，当前 {clicked_count} 位）"
+                )
                 return False
             return True
 
@@ -207,7 +238,7 @@ class AttendeeSelector:
                 return not require_attendee_section
         else:
             attendee_section_visible = bot._has_element(
-                AppiumBy.ANDROID_UIAUTOMATOR,
+                ANDROID_UIAUTOMATOR,
                 'new UiSelector().textContains("实名观演人")',
             )
             if not attendee_section_visible:
@@ -224,7 +255,9 @@ class AttendeeSelector:
         if selected_count >= required_count:
             return True
 
-        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
+        logger.info(
+            f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）"
+        )
 
         unmatched_users = []
         for user_name in self._config.users or []:
@@ -236,7 +269,9 @@ class AttendeeSelector:
                 unmatched_users.append(user_name)
 
         if unmatched_users and selected_count < required_count:
-            logger.warning(f"未能按姓名定位观演人: {'、'.join(unmatched_users)}，将尝试按勾选框兜底")
+            logger.warning(
+                f"未能按姓名定位观演人: {'、'.join(unmatched_users)}，将尝试按勾选框兜底"
+            )
 
         if selected_count < required_count:
             for checkbox in bot._attendee_checkbox_elements():
@@ -249,7 +284,9 @@ class AttendeeSelector:
                 selected_count = bot._attendee_selected_count()
 
         if selected_count < required_count:
-            logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）")
+            logger.warning(
+                f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）"
+            )
             return False
         return True
 

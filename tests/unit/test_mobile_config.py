@@ -17,12 +17,7 @@ from mobile.config import (
 
 
 _VALID = dict(
-    server_url="http://localhost:4723",
     serial=None,
-    driver_backend="appium",
-    device_name="Android",
-    udid=None,
-    platform_version=None,
     app_package="cn.damai",
     app_activity=".launcher.splash.SplashMainActivity",
     keyword="周深",
@@ -66,7 +61,6 @@ class TestMobileConfigInit:
 
     def test_config_init_stores_all_attributes(self):
         cfg = Config(
-            server_url="http://localhost:4723",
             keyword="周深",
             users=["张三", "李四"],
             city="深圳",
@@ -75,18 +69,10 @@ class TestMobileConfigInit:
             price_index=1,
             if_commit_order=True,
             probe_only=True,
-            device_name="Pixel 8",
-            udid="R58M123456A",
-            platform_version="14",
             app_package="cn.damai",
             app_activity=".launcher.splash.SplashMainActivity",
         )
-        assert cfg.server_url == "http://localhost:4723"
         assert cfg.serial is None
-        assert cfg.driver_backend == "u2"
-        assert cfg.device_name == "Pixel 8"
-        assert cfg.udid == "R58M123456A"
-        assert cfg.platform_version == "14"
         assert cfg.app_package == "cn.damai"
         assert cfg.app_activity == ".launcher.splash.SplashMainActivity"
         assert cfg.keyword == "周深"
@@ -101,24 +87,6 @@ class TestMobileConfigInit:
 
 class TestMobileConfigValidation:
 
-    def test_driver_backend_defaults_to_u2(self):
-        payload = _make(server_url=None)
-        payload.pop("driver_backend")
-        cfg = Config(**payload)
-        assert cfg.driver_backend == "u2"
-
-    def test_driver_backend_invalid_raises(self):
-        with pytest.raises(ValueError, match="driver_backend"):
-            Config(**_make(driver_backend="invalid"))
-
-    def test_driver_backend_appium_requires_server_url(self):
-        with pytest.raises(ValueError, match="server_url"):
-            Config(**_make(driver_backend="appium", server_url=None))
-
-    def test_driver_backend_u2_allows_missing_server_url(self):
-        cfg = Config(**_make(driver_backend="u2", server_url=None))
-        assert cfg.server_url is None
-
     def test_serial_string_is_valid(self):
         cfg = Config(**_make(serial="c6c4eb67"))
         assert cfg.serial == "c6c4eb67"
@@ -126,18 +94,6 @@ class TestMobileConfigValidation:
     def test_serial_empty_raises(self):
         with pytest.raises(ValueError, match="serial"):
             Config(**_make(serial=""))
-
-    def test_invalid_server_url_raises(self):
-        with pytest.raises(ValueError, match="server_url"):
-            Config(**_make(server_url="localhost:4723"))
-
-    def test_server_url_ftp_raises(self):
-        with pytest.raises(ValueError, match="server_url"):
-            Config(**_make(server_url="ftp://localhost:4723"))
-
-    def test_server_url_https_is_valid(self):
-        cfg = Config(**_make(server_url="https://remote.appium.io"))
-        assert cfg.server_url == "https://remote.appium.io"
 
     def test_empty_users_raises(self):
         with pytest.raises(ValueError, match="users"):
@@ -194,18 +150,6 @@ class TestMobileConfigValidation:
     def test_probe_only_non_bool_raises(self):
         with pytest.raises(ValueError, match="probe_only"):
             Config(**_make(probe_only="yes"))
-
-    def test_device_name_empty_raises(self):
-        with pytest.raises(ValueError, match="device_name"):
-            Config(**_make(device_name=""))
-
-    def test_udid_empty_raises(self):
-        with pytest.raises(ValueError, match="udid"):
-            Config(**_make(udid=""))
-
-    def test_platform_version_empty_raises(self):
-        with pytest.raises(ValueError, match="platform_version"):
-            Config(**_make(platform_version=""))
 
     def test_app_package_empty_raises(self):
         with pytest.raises(ValueError, match="app_package"):
@@ -314,10 +258,6 @@ class TestMobileConfigLoadConfig:
         monkeypatch.chdir(mock_mobile_config_file.__wrapped__ if hasattr(mock_mobile_config_file, '__wrapped__') else mock_mobile_config_file().parent)
         # Re-create since chdir changed
         config_data = {
-            "server_url": "http://127.0.0.1:4723",
-            "device_name": "Pixel 8",
-            "udid": "R58M123456A",
-            "platform_version": "14",
             "app_package": "cn.damai",
             "app_activity": ".launcher.splash.SplashMainActivity",
             "keyword": "test",
@@ -333,10 +273,6 @@ class TestMobileConfigLoadConfig:
             json.dump(config_data, f)
 
         cfg = Config.load_config()
-        assert cfg.server_url == "http://127.0.0.1:4723"
-        assert cfg.device_name == "Pixel 8"
-        assert cfg.udid == "R58M123456A"
-        assert cfg.platform_version == "14"
         assert cfg.app_package == "cn.damai"
         assert cfg.app_activity == ".launcher.splash.SplashMainActivity"
         assert cfg.keyword == "test"
@@ -344,15 +280,12 @@ class TestMobileConfigLoadConfig:
         assert cfg.city == "北京"
         assert cfg.if_commit_order is False
         assert cfg.probe_only is True
-        assert cfg.driver_backend == "u2"
         assert cfg.serial is None
 
-    def test_load_config_reads_driver_backend_and_serial(self, tmp_path, monkeypatch):
+    def test_load_config_reads_serial(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
-            "driver_backend": "appium",
             "serial": "abc123",
-            "server_url": "http://127.0.0.1:4723",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -364,26 +297,7 @@ class TestMobileConfigLoadConfig:
         (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
 
         cfg = Config.load_config()
-        assert cfg.driver_backend == "appium"
         assert cfg.serial == "abc123"
-        assert cfg.server_url == "http://127.0.0.1:4723"
-
-    def test_load_config_appium_requires_server_url(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        config_data = {
-            "driver_backend": "appium",
-            "keyword": "test",
-            "users": ["A"],
-            "city": "北京",
-            "date": "01.01",
-            "price": "100元",
-            "price_index": 0,
-            "if_commit_order": False,
-        }
-        (tmp_path / "config.jsonc").write_text(json.dumps(config_data), encoding="utf-8")
-
-        with pytest.raises(KeyError, match="server_url"):
-            Config.load_config()
 
     def test_load_config_file_not_found(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -399,14 +313,13 @@ class TestMobileConfigLoadConfig:
 
     def test_load_config_missing_keys(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        (tmp_path / "config.jsonc").write_text('{"server_url": "x"}', encoding="utf-8")
+        (tmp_path / "config.jsonc").write_text('{"keyword": "test"}', encoding="utf-8")
         with pytest.raises(KeyError, match="缺少必需字段"):
             Config.load_config()
 
     def test_load_config_requires_keyword(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
-            "server_url": "http://127.0.0.1:4723",
             "users": ["A"],
             "city": "北京",
             "date": "01.01",
@@ -422,7 +335,7 @@ class TestMobileConfigLoadConfig:
     def test_load_config_jsonc_with_comments(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         jsonc_content = """{
-  // Appium server URL
+  // server URL (ignored, kept for compat)
   "server_url": "http://127.0.0.1:4723",
   "keyword": "test",
   "users": ["A"],
@@ -436,10 +349,6 @@ class TestMobileConfigLoadConfig:
 }"""
         (tmp_path / "config.jsonc").write_text(jsonc_content, encoding="utf-8")
         cfg = Config.load_config()
-        assert cfg.server_url == "http://127.0.0.1:4723"
-        assert cfg.device_name == "Android"
-        assert cfg.udid is None
-        assert cfg.platform_version is None
         assert cfg.price_index == 0
         assert cfg.probe_only is True
 
@@ -501,7 +410,6 @@ class TestMobileConfigLoadConfig:
     def test_load_config_reads_rush_mode(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
-            "server_url": "http://127.0.0.1:4723",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -520,7 +428,6 @@ class TestMobileConfigLoadConfig:
     def test_load_config_reads_wait_cta_ready_timeout_ms(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         config_data = {
-            "server_url": "http://127.0.0.1:4723",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -540,7 +447,6 @@ class TestMobileConfigLoadConfig:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("HATICKETS_CONFIG_PATH", raising=False)
         shared_fields = {
-            "server_url": "http://127.0.0.1:4723",
             "users": ["A"],
             "city": "北京",
             "date": "01.01",
@@ -564,7 +470,6 @@ class TestMobileConfigLoadConfig:
     def test_load_config_uses_env_override_for_config_local_jsonc(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         shared_fields = {
-            "server_url": "http://127.0.0.1:4723",
             "users": ["A"],
             "city": "北京",
             "date": "01.01",
@@ -590,7 +495,6 @@ class TestMobileConfigLoadConfig:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("HATICKETS_CONFIG_PATH", raising=False)
         source = {
-            "server_url": "http://127.0.0.1:4723",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -608,7 +512,6 @@ class TestMobileConfigLoadConfig:
     def test_save_config_dict_uses_env_override_for_config_local_jsonc(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         source = {
-            "server_url": "http://127.0.0.1:4723",
             "keyword": "test",
             "users": ["A"],
             "city": "北京",
@@ -644,8 +547,6 @@ class TestUncoveredBranches:
         """Config.load_config raises KeyError when keyword is absent."""
         monkeypatch.chdir(tmp_path)
         source = {
-            "server_url": "http://127.0.0.1:4723",
-            "device_name": "Android",
             "app_package": "cn.damai",
             "app_activity": ".SplashMainActivity",
             "users": ["A"],

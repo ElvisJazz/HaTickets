@@ -1,8 +1,8 @@
 """
 Shared pytest fixtures and configuration.
 """
+
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -21,31 +21,17 @@ _web_dir = str(_project_root / "web")
 if _web_dir not in sys.path:
     sys.path.insert(0, _web_dir)
 
-# Mock appium package since it's not installed in test environment
-_mock_appium = Mock()
-_mock_appium.webdriver = Mock()
-_mock_appium.webdriver.Remote = Mock()
-_mock_appium.options = Mock()
-_mock_appium.options.common = Mock()
-_mock_appium.options.common.base = Mock()
-_mock_appium.options.common.base.AppiumOptions = Mock()
-_mock_appium.webdriver.common = Mock()
-_mock_appium.webdriver.common.appiumby = Mock()
-_mock_appium.webdriver.common.appiumby.AppiumBy = Mock()
-_mock_appium.webdriver.common.appiumby.AppiumBy.ANDROID_UIAUTOMATOR = "android_uiautomator"
+# Preserve the real uiautomator2.exceptions module before mocking the package,
+# so ``from uiautomator2.exceptions import ConnectError`` still resolves.
+import importlib as _importlib
 
-sys.modules["appium"] = _mock_appium
-sys.modules["appium.webdriver"] = _mock_appium.webdriver
-sys.modules["appium.options"] = _mock_appium.options
-sys.modules["appium.options.common"] = _mock_appium.options.common
-sys.modules["appium.options.common.base"] = _mock_appium.options.common.base
-sys.modules["appium.webdriver.common"] = _mock_appium.webdriver.common
-sys.modules["appium.webdriver.common.appiumby"] = _mock_appium.webdriver.common.appiumby
+_real_u2_exceptions = _importlib.import_module("uiautomator2.exceptions")
 
 # Mock uiautomator2 package for tests that exercise u2 backend without real devices
 _mock_uiautomator2 = Mock()
 _mock_uiautomator2.connect = Mock()
 sys.modules["uiautomator2"] = _mock_uiautomator2
+sys.modules["uiautomator2.exceptions"] = _real_u2_exceptions
 
 
 @pytest.fixture
@@ -77,7 +63,7 @@ def mock_selenium_driver():
     with patch("selenium.webdriver.Chrome") as mock_driver_class:
         mock_driver = Mock()
         mock_driver_class.return_value = mock_driver
-        
+
         # Common WebDriver methods
         mock_driver.get = Mock()
         mock_driver.find_element = Mock()
@@ -85,23 +71,23 @@ def mock_selenium_driver():
         mock_driver.quit = Mock()
         mock_driver.current_url = "https://example.com"
         mock_driver.title = "Test Page"
-        
+
         yield mock_driver
 
 
 @pytest.fixture
-def mock_appium_driver():
-    """Mock Appium driver for mobile tests."""
-    # Create a mock driver without importing appium
+def mock_u2_driver():
+    """Mock u2 device for mobile tests."""
     mock_driver = Mock()
-    
-    # Common Appium methods
     mock_driver.find_element = Mock()
     mock_driver.find_elements = Mock()
     mock_driver.tap = Mock()
     mock_driver.swipe = Mock()
     mock_driver.quit = Mock()
-    
+    mock_driver.click = Mock()
+    mock_driver.shell = Mock()
+    mock_driver.app_current = Mock(return_value={"package": "cn.damai"})
+    mock_driver.settings = {}
     yield mock_driver
 
 
@@ -125,19 +111,19 @@ def sample_html_response() -> str:
 def mock_time(monkeypatch):
     """Mock time-related functions for deterministic tests."""
     import time
-    
+
     current_time = 1704067200.0  # 2024-01-01 00:00:00 UTC
-    
+
     def mock_time_func():
         return current_time
-    
+
     def mock_sleep(seconds):
         nonlocal current_time
         current_time += seconds
-    
+
     monkeypatch.setattr(time, "time", mock_time_func)
     monkeypatch.setattr(time, "sleep", mock_sleep)
-    
+
     return mock_time_func
 
 
@@ -149,9 +135,8 @@ def reset_environment(monkeypatch):
         "DAMAI_USERNAME",
         "DAMAI_PASSWORD",
         "SELENIUM_DRIVER_PATH",
-        "APPIUM_SERVER_URL",
     ]
-    
+
     for var in env_vars_to_clear:
         monkeypatch.delenv(var, raising=False)
 
@@ -159,11 +144,12 @@ def reset_environment(monkeypatch):
 @pytest.fixture
 def mock_file_operations(tmp_path):
     """Provide mocked file operations for tests."""
+
     def create_test_file(filename: str, content: str = "") -> Path:
         file_path = tmp_path / filename
         file_path.write_text(content)
         return file_path
-    
+
     return create_test_file
 
 
@@ -171,15 +157,9 @@ def mock_file_operations(tmp_path):
 def pytest_configure(config):
     """Configure pytest with custom settings."""
     # Add custom markers description
-    config.addinivalue_line(
-        "markers", "unit: mark test as a unit test"
-    )
-    config.addinivalue_line(
-        "markers", "integration: mark test as an integration test"
-    )
-    config.addinivalue_line(
-        "markers", "slow: mark test as slow running"
-    )
+    config.addinivalue_line("markers", "unit: mark test as a unit test")
+    config.addinivalue_line("markers", "integration: mark test as an integration test")
+    config.addinivalue_line("markers", "slow: mark test as slow running")
 
 
 def pytest_collection_modifyitems(config, items):
@@ -194,10 +174,12 @@ def pytest_collection_modifyitems(config, items):
 
 # ── New fixtures for regression tests ──
 
+
 @pytest.fixture
 def web_config():
     """Create a real web Config instance for testing."""
     from config import Config as WebConfig
+
     return WebConfig(
         index_url="https://www.damai.cn/",
         login_url="https://passport.damai.cn/login",
@@ -217,11 +199,9 @@ def web_config():
 @pytest.fixture
 def mobile_config():
     """Create a real mobile Config instance for testing."""
-    # Import from mobile's config (already on sys.path)
     from mobile.config import Config as MobileConfig
+
     return MobileConfig(
-        server_url="http://127.0.0.1:4723",
-        driver_backend="appium",
         keyword="test",
         users=["UserA", "UserB"],
         city="深圳",
@@ -235,26 +215,31 @@ def mobile_config():
 @pytest.fixture
 def mock_concert(web_config, mock_selenium_driver):
     """Create a Concert instance with mocked WebDriver."""
-    with patch("concert.get_chromedriver_path", return_value="/fake/chromedriver"), \
-         patch("concert.webdriver.Chrome", return_value=mock_selenium_driver), \
-         patch("concert.Service"):
+    with (
+        patch("concert.get_chromedriver_path", return_value="/fake/chromedriver"),
+        patch("concert.webdriver.Chrome", return_value=mock_selenium_driver),
+        patch("concert.Service"),
+    ):
         from concert import Concert
+
         concert = Concert(web_config)
         yield concert
 
 
 @pytest.fixture
-def mock_damai_bot(mobile_config, mock_appium_driver):
-    """Create a DamaiBot instance with mocked Appium driver."""
-    mock_appium_driver.update_settings = Mock()
-    mock_appium_driver.execute_script = Mock()
-    mock_appium_driver.find_element = Mock()
-    mock_appium_driver.find_elements = Mock(return_value=[])
+def mock_damai_bot(mobile_config, mock_u2_driver):
+    """Create a DamaiBot instance with mocked u2 driver."""
+    mock_u2_driver.update_settings = Mock()
+    mock_u2_driver.execute_script = Mock()
+    mock_u2_driver.find_element = Mock()
+    mock_u2_driver.find_elements = Mock(return_value=[])
 
-    with patch("mobile.damai_app.Config.load_config", return_value=mobile_config), \
-         patch("mobile.damai_app.webdriver.Remote", return_value=mock_appium_driver), \
-         patch("mobile.damai_app.AppiumOptions"):
+    with (
+        patch("mobile.damai_app.Config.load_config", return_value=mobile_config),
+        patch("uiautomator2.connect", return_value=mock_u2_driver),
+    ):
         from mobile.damai_app import DamaiBot
+
         bot = DamaiBot()
         yield bot
 
@@ -262,6 +247,7 @@ def mock_damai_bot(mobile_config, mock_appium_driver):
 @pytest.fixture
 def mock_web_config_file(tmp_path):
     """Create a temporary web config.json file."""
+
     def create(content=None):
         if content is None:
             content = {
@@ -277,14 +263,18 @@ def mock_web_config_file(tmp_path):
                 "max_retries": 3,
             }
         config_path = tmp_path / "config.json"
-        config_path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        config_path.write_text(
+            json.dumps(content, ensure_ascii=False), encoding="utf-8"
+        )
         return config_path
+
     return create
 
 
 @pytest.fixture
 def mock_mobile_config_file(tmp_path):
     """Create a temporary mobile config.jsonc file."""
+
     def create(content=None, raw_text=None):
         if raw_text is not None:
             config_path = tmp_path / "config.jsonc"
@@ -292,7 +282,6 @@ def mock_mobile_config_file(tmp_path):
             return config_path
         if content is None:
             content = {
-                "server_url": "http://127.0.0.1:4723",
                 "keyword": "test",
                 "users": ["UserA", "UserB"],
                 "city": "深圳",
@@ -302,6 +291,9 @@ def mock_mobile_config_file(tmp_path):
                 "if_commit_order": True,
             }
         config_path = tmp_path / "config.jsonc"
-        config_path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        config_path.write_text(
+            json.dumps(content, ensure_ascii=False), encoding="utf-8"
+        )
         return config_path
+
     return create

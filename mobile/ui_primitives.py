@@ -25,14 +25,18 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+# Constant replacing the former AppiumBy.ANDROID_UIAUTOMATOR selector type.
+# Used as a routing key in _appium_selector_to_u2 / _parse_uiselector.
+ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+
 class UIPrimitives:
     """Mixin providing low-level UI interaction methods.
 
     Expects the following attributes on *self* (set by the concrete subclass):
-    - ``self.d``   — uiautomator2 device handle (or None)
-    - ``self.driver`` — Appium / u2 driver
-    - ``self.wait``  — WebDriverWait instance (or None for u2)
-    - ``self.config`` — Config object with at least ``app_package``, ``driver_backend``
+    - ``self.d``   — uiautomator2 device handle
+    - ``self.driver`` — u2 driver (same as ``self.d``)
+    - ``self.config`` — Config object with at least ``app_package``
     - ``self._cached_hot_path_coords`` — ``dict`` of ``{key: (x, y)}``
     """
 
@@ -42,23 +46,17 @@ class UIPrimitives:
 
     @staticmethod
     def _uiautomator_by_values():
-        from appium.webdriver.common.appiumby import AppiumBy
-        values = {"android uiautomator", "android_uiautomator"}
-        try:
-            values.add(AppiumBy.ANDROID_UIAUTOMATOR)
-        except Exception:
-            pass
-        return values
+        return {"android uiautomator", "android_uiautomator", ANDROID_UIAUTOMATOR}
 
     def _using_u2(self):
-        return getattr(self.config, "driver_backend", "u2") == "u2"
+        return True
 
     # ------------------------------------------------------------------
     # Core element operations
     # ------------------------------------------------------------------
 
     def _find(self, by, value):
-        """统一查找入口，返回 u2 selector 或 Appium element。"""
+        """统一查找入口，返回 u2 selector。"""
         if not self._using_u2():
             return self.driver.find_element(by, value)
         return self._appium_selector_to_u2(by, value)
@@ -69,7 +67,7 @@ class UIPrimitives:
         return f'"{escaped}"'
 
     def _find_all(self, by, value):
-        """统一查找列表，返回 u2 element list 或 Appium element list。"""
+        """统一查找列表，返回 u2 element list。"""
         if not self._using_u2():
             elements = self.driver.find_elements(by=by, value=value)
             if isinstance(elements, (list, tuple)):

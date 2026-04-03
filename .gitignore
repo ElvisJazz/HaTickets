@@ -40,8 +40,7 @@ mobile/config.jsonc
 mobile/config.local.jsonc
 web/config.local.json
 
-# Appium / local debug artifacts
-.appium/
+# Local debug artifacts
 tmp/
 tmp_*.png
 tmp_*.xml

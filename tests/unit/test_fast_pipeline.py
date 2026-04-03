@@ -224,3 +224,62 @@ class TestRunWarmFast:
         first_call_args = device.shell.call_args_list[0][0][0]
         assert "input tap 300 400" in first_call_args
         assert "input tap 540 1700" in first_call_args
+
+
+# ---------------------------------------------------------------------------
+# FastPipeline validation helpers
+# ---------------------------------------------------------------------------
+
+
+class TestValidationHelpers:
+
+    def _make_validation_pipeline(self):
+        device = Mock()
+        device.shell = Mock(return_value=("", ""))
+        config = Mock()
+        config.if_commit_order = False
+        config.price_index = 5
+        config.users = ["UserA"]
+        config.city = "北京"
+        config.date = "04.18"
+
+        fp = FastPipeline(device, config, probe=False, guard=Mock())
+        bot = Mock()
+        bot._wait_for_purchase_entry_result = Mock(return_value={"state": "sku_page"})
+        bot._dump_hierarchy_xml = Mock(return_value=Mock())
+        bot._get_price_option_coordinates_by_config_index = Mock(
+            return_value=(300, 1200)
+        )
+        bot._get_buy_button_coordinates = Mock(return_value=(540, 2100))
+        bot._attendee_checkbox_elements = Mock(return_value=[])
+        bot._set_run_outcome = Mock()
+        fp.set_bot(bot)
+        return fp, bot, device
+
+    def test_wait_for_purchase_entry_uses_lightweight_timeout(self):
+        fp, bot, _device = self._make_validation_pipeline()
+
+        result = fp._wait_for_purchase_entry(time.time() + 1.0)
+
+        assert result == {"state": "sku_page"}
+        bot._wait_for_purchase_entry_result.assert_called_once()
+        kwargs = bot._wait_for_purchase_entry_result.call_args.kwargs
+        assert kwargs["fallback_probe_on_timeout"] is False
+        assert kwargs["poll_interval"] == 0.03
+
+    def test_run_cold_validation_skips_element_price_fallback_when_shell_confirms(self):
+        fp, bot, _device = self._make_validation_pipeline()
+        fp._cached_coords["detail_buy"] = (540, 1800)
+
+        with (
+            patch.object(fp, "rush_preselect_and_buy_via_xml", return_value=True),
+            patch.object(fp, "_wait_for_purchase_entry", return_value={"state": "sku_page"}),
+            patch.object(fp, "_shell_price_and_buy_until_confirm", return_value=True),
+            patch.object(fp, "_select_price_with_pipeline") as select_price,
+            patch.object(fp, "_finish_confirm", return_value=True) as finish_confirm,
+        ):
+            result = fp.run_cold_validation(start_time=time.time())
+
+        assert result is True
+        select_price.assert_not_called()
+        finish_confirm.assert_called_once()

@@ -15,8 +15,9 @@ import tempfile
 import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, Optional, Tuple
 
-from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.common.by import By
+
+from mobile.ui_primitives import ANDROID_UIAUTOMATOR
 from selenium.webdriver.support import expected_conditions as EC
 
 from mobile.logger import get_logger
@@ -34,6 +35,16 @@ logger = get_logger(__name__)
 _PRICE_UNAVAILABLE_TAGS = {"无票", "缺货", "缺货登记", "售罄", "已售罄", "不可选", "暂不可售"}
 _MAGICK_BIN = shutil.which("magick")
 _TESSERACT_BIN = shutil.which("tesseract")
+_OCR_CHAR_TRANSLATIONS = str.maketrans({
+    "O": "0",
+    "o": "0",
+    "I": "1",
+    "l": "1",
+    "|": "1",
+    "S": "5",
+    "s": "5",
+    "B": "8",
+})
 
 
 class PriceSelector:
@@ -111,7 +122,7 @@ class PriceSelector:
 
         selectors = [
             (By.ID, "cn.damai:id/btn_buy_view"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")'),
         ]
         for by, value in selectors:
             try:
@@ -391,7 +402,7 @@ class PriceSelector:
                     return True
 
         price_text_selector = f'new UiSelector().textContains("{self._config.price}")'
-        if bot.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.35):
+        if bot.ultra_fast_click(ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.35):
             logger.info(f"通过文本快速匹配选择票价: {self._config.price}")
             return True
 
@@ -440,7 +451,7 @@ class PriceSelector:
                 return False
 
         price_text_selector = f'new UiSelector().textContains("{self._config.price}")'
-        if bot.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.8):
+        if bot.ultra_fast_click(ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.8):
             logger.info(f"通过文本匹配选择票价: {self._config.price}")
             return True
 
@@ -450,7 +461,7 @@ class PriceSelector:
             price_container = bot._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
             if not bot._using_u2():
                 target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    ANDROID_UIAUTOMATOR,
                     f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)'
                 )
             else:
@@ -477,7 +488,7 @@ class PriceSelector:
                     )
                 if not bot._using_u2():
                     target_price = price_container.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
+                        ANDROID_UIAUTOMATOR,
                         f'new UiSelector().className("android.widget.FrameLayout").index({self._config.price_index}).clickable(true)'
                     )
                 else:
@@ -499,7 +510,20 @@ class PriceSelector:
 
     def _normalize_ocr_price_text(self, ocr_output):
         """Extract the leading ticket price from noisy OCR output."""
-        normalized_text = ocr_output if isinstance(ocr_output, str) else ""
+        normalized_text = (ocr_output if isinstance(ocr_output, str) else "").translate(
+            _OCR_CHAR_TRANSLATIONS
+        )
+
+        digit_runs = re.findall(r"\d{3,5}", normalized_text)
+        for run in digit_runs:
+            if len(run) >= 4:
+                leading_four = int(run[:4])
+                if 1000 <= leading_four <= 1999:
+                    return f"{leading_four}元"
+            leading_three = int(run[:3])
+            if 100 <= leading_three <= 999:
+                return f"{leading_three}元"
+
         digits = "".join(re.findall(r"\d", normalized_text))
         if len(digits) >= 4:
             leading_four = int(digits[:4])
@@ -509,6 +533,75 @@ class PriceSelector:
             leading_three = int(digits[:3])
             if 100 <= leading_three <= 999:
                 return f"{leading_three}元"
+        return ""
+
+    def _price_ocr_focus_rect(self, rect):
+        """Crop the left-side price area instead of the whole card.
+
+        Damai's card OCR is often polluted by the center reservation tag and
+        the trailing favourite icon. A tighter left-side crop is much more
+        reliable for numeric ticket prices.
+        """
+        if not rect:
+            return None
+
+        width = max(1, int(rect.get("width", 0)))
+        height = max(1, int(rect.get("height", 0)))
+        x = int(rect.get("x", 0))
+        y = int(rect.get("y", 0))
+
+        focus_x = x + max(0, int(width * 0.03))
+        focus_y = y + max(0, int(height * 0.08))
+        focus_width = max(1, int(width * 0.35))
+        focus_height = max(1, int(height * 0.60))
+        return {
+            "x": focus_x,
+            "y": focus_y,
+            "width": focus_width,
+            "height": focus_height,
+        }
+
+    @staticmethod
+    def _choose_best_ocr_price_candidate(candidates):
+        """Pick the most trustworthy OCR price from multiple crop/psm attempts."""
+        if not candidates:
+            return ""
+
+        by_key = {
+            (item["variant"], item["psm"]): item["price"]
+            for item in candidates
+            if item.get("price")
+        }
+        price_counts = {}
+        for item in candidates:
+            price = item.get("price")
+            if not price:
+                continue
+            price_counts[price] = price_counts.get(price, 0) + 1
+
+        focus_13 = by_key.get(("focus", "13"), "")
+        full_11 = by_key.get(("full", "11"), "")
+
+        if focus_13 and price_counts.get(focus_13, 0) > 1:
+            return focus_13
+        if full_11 and price_counts.get(full_11, 0) > 1:
+            return full_11
+        if focus_13 and full_11 and focus_13 == full_11:
+            return focus_13
+        if full_11:
+            return full_11
+        if focus_13:
+            return focus_13
+
+        ranked = sorted(
+            (
+                (count, price)
+                for price, count in price_counts.items()
+            ),
+            reverse=True,
+        )
+        if ranked:
+            return ranked[0][1]
         return ""
 
     def _ocr_price_text_from_card(self, screenshot_path, rect):
@@ -521,25 +614,71 @@ class PriceSelector:
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
                 crop_path = tmp_file.name
 
-            subprocess.run(
-                [
-                    _MAGICK_BIN,
-                    screenshot_path,
-                    "-crop", f"{rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}",
-                    "-resize", "300%",
-                    crop_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            result = subprocess.run(
-                [_TESSERACT_BIN, crop_path, "stdout", "-l", "eng+snum", "--psm", "6"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return self._normalize_ocr_price_text(result.stdout)
+            crop_variants = []
+            focus_rect = self._price_ocr_focus_rect(rect)
+            if focus_rect:
+                crop_variants.append(
+                    (
+                        "focus",
+                        focus_rect,
+                        [
+                            "-resize",
+                            "500%",
+                            "-colorspace",
+                            "Gray",
+                            "-threshold",
+                            "75%",
+                        ],
+                    )
+                )
+            crop_variants.append(("full", rect, ["-resize", "300%"]))
+
+            candidates = []
+            for variant_name, crop_rect, extra_args in crop_variants:
+                subprocess.run(
+                    [
+                        _MAGICK_BIN,
+                        screenshot_path,
+                        "-crop",
+                        (
+                            f"{crop_rect['width']}x{crop_rect['height']}"
+                            f"+{crop_rect['x']}+{crop_rect['y']}"
+                        ),
+                        *extra_args,
+                        crop_path,
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+
+                for psm in ("13", "7", "11", "6"):
+                    result = subprocess.run(
+                        [
+                            _TESSERACT_BIN,
+                            crop_path,
+                            "stdout",
+                            "-l",
+                            "eng",
+                            "--psm",
+                            psm,
+                            "-c",
+                            "tessedit_char_whitelist=0123456789",
+                        ],
+                        check=False,
+                        capture_output=True,
+                    )
+                    ocr_text = result.stdout.decode("utf-8", "ignore")
+                    normalized = self._normalize_ocr_price_text(ocr_text)
+                    if normalized:
+                        candidates.append(
+                            {
+                                "variant": variant_name,
+                                "psm": psm,
+                                "price": normalized,
+                            }
+                        )
+
+            return self._choose_best_ocr_price_candidate(candidates)
         except Exception:
             return ""
         finally:

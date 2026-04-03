@@ -1,10 +1,13 @@
 # 迁移计划：Mobile 模块 Appium → openatx/uiautomator2
 
+> **状态：已完成归档** — 迁移于 2026-04 完成，Appium 依赖已全部移除，u2 直连已上线。本文档仅作历史参考。
+
 ## 背景与目标
 
 **目标**：去掉 Appium Server（Node.js 进程）这一中间层，改用 `openatx/uiautomator2` 直连设备，降低每次操作的通信延迟，简化启动流程。
 
 **收益**：
+
 - 连接建立时间：~3s → ~0.5s（一次性，不影响热路径计时）
 - 每次 find_element 少一层 HTTP relay（节省 10–30ms/次，热路径 ~20 次操作 → ~200–500ms）
 - recovery 时间预计从 ~8.9s 降到 ~6–7s（元素查找密集）
@@ -12,6 +15,7 @@
 - 无需先运行 `start_appium.sh`，消除常见"忘记启动服务"失败模式
 
 **风控与虚拟机注意事项**：
+
 - 底层仍使用 UIAutomator2 框架，检测向量与 Appium 相同；仅 APK 包名不同（`io.appium.uiautomator2.server` → `com.github.uiautomator`）
 - 不要在 Android 模拟器上运行正式抢票：模拟器硬件指纹（`ro.hardware=goldfish`、x86 架构、Play Integrity 失败）极易被风控检测，可能导致静默失败
 - 迁移本身不改变行为模式（坐标点击已是最优解），风控暴露面不增不减
@@ -74,6 +78,7 @@ def update_runtime_mode(probe_only, if_commit_order, config_path=None):
 ### `start_ticket_grabbing.sh` 已有 `--probe` 标志
 
 脚本已实现命令语义固定：
+
 - `./start_ticket_grabbing.sh --probe [--yes]`：安全探测（强制 probe_only=true, if_commit_order=false）
 - `./start_ticket_grabbing.sh [--yes]`：正式抢票（强制 probe_only=false, if_commit_order=true）
 
@@ -82,6 +87,7 @@ def update_runtime_mode(probe_only, if_commit_order, config_path=None):
 ### `run_ticket_grabbing()` 的 `fast_validation_hot_path`
 
 当同时满足以下条件时，跳过 `dismiss_startup_popups()` 和 `check_session_valid()`：
+
 ```python
 fast_validation_hot_path = (
     config.rush_mode
@@ -96,6 +102,7 @@ fast_validation_hot_path = (
 ### rush_mode 热路径坐标预缓存机制
 
 `_prepare_detail_page_hot_path()` 在开售前调用，返回：
+
 - `price_coords`：价格卡片坐标（来自 `_get_price_option_coordinates_by_config_index()`）
 - `buy_button_coords`：购票按钮坐标
 
@@ -209,44 +216,44 @@ tests/unit/test_mobile_config.py  ← 新增 serial/driver_backend 字段测试
 
 ## API 映射表
 
-| 当前 Appium 调用 | uiautomator2 等价 | 备注 |
-|---|---|---|
-| `webdriver.Remote(url, options)` | `u2.connect(serial)` | serial=None 自动选第一台设备 |
-| `driver.find_element(By.ID, "cn.damai:id/foo")` | `d(resourceId="cn.damai:id/foo")` | |
-| `driver.find_elements(By.ID, "...")` | `list(d(resourceId="..."))` | |
-| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("X")')` | `d(text="X")` | |
-| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("X")')` | `d(textContains="X")` | |
-| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*X.*")')` | `d(textMatches=".*X.*")` | |
-| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, '...className("X").clickable(true).instance(N)')` | `d(className="X", clickable=True, instance=N)` | |
-| `driver.find_element(By.XPATH, '//*[@text="X"]')` | `d.xpath('//*[@text="X"]').get_element()` | |
-| `driver.find_elements(By.CLASS_NAME, "android.widget.FrameLayout")` | `list(d(className="android.widget.FrameLayout"))` | |
-| `container.find_elements(By.CLASS_NAME, "X")` | `list(container.child(className="X"))` | container 为 u2 selector，不是 element |
-| `container.find_elements(By.ID, "cn.damai:id/foo")` | `list(container.child(resourceId="cn.damai:id/foo"))` | 同上 |
-| `container.find_elements(By.XPATH, ".//*")` | `d.xpath(absolute_xpath + '//*').all()` | u2 不支持相对 XPath；需先获取容器绝对 XPath 或 bounds |
-| `element.rect` → `{'x','y','width','height'}` | `el.info['bounds']` → `{'left','top','right','bottom'}` + `_element_rect()` 转换 | 见下方 |
-| `element.text` | `el.get_text()` 或 `el.info['text']` | |
-| `element.get_attribute("clickable")` | `el.info.get('clickable', False)` | 返回 bool，删除 `.lower() == "true"` 转换 |
-| `element.get_attribute("checked")` | `el.info.get('checked', False)` | 同上，用于 checkbox 状态 |
-| `execute_script("mobile: clickGesture", {"x":x,"y":y})` | `d.click(x, y)` | duration≤50 直接 click |
-| `execute_script("mobile: clickGesture", {"elementId": el.id})` | 获取 `el.info['bounds']` 计算中心坐标，再 `d.click(cx, cy)` | u2 无 elementId 概念 |
-| `execute_script("mobile: swipeGesture", {...})` | `d.swipe(fx, fy, tx, ty, duration)` | 参数格式不同，需换算 |
-| `driver.current_activity` | `d.app_current()['activity']` | |
-| `driver.update_settings({...})` | `d.settings[key] = value` | key 名称有差异，见下方 |
-| `WebDriverWait(driver, t).until(EC.presence_of_element_located(...))` | `d(...).wait(timeout=t)` 返回 bool | |
-| `driver.page_source` | `d.dump_hierarchy()` | 返回 XML 字符串，格式相同 |
-| `driver.get_screenshot_as_file(path)` | `d.screenshot(path)` | |
-| `driver.press_keycode(keycode)` | `d.press(keycode)` | |
-| `driver.activate_app(package)` | `d.app_start(package, stop=False)` | |
+| 当前 Appium 调用                                                                                     | uiautomator2 等价                                                                | 备注                                                  |
+| ---------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `webdriver.Remote(url, options)`                                                                     | `u2.connect(serial)`                                                             | serial=None 自动选第一台设备                          |
+| `driver.find_element(By.ID, "cn.damai:id/foo")`                                                      | `d(resourceId="cn.damai:id/foo")`                                                |                                                       |
+| `driver.find_elements(By.ID, "...")`                                                                 | `list(d(resourceId="..."))`                                                      |                                                       |
+| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("X")')`                    | `d(text="X")`                                                                    |                                                       |
+| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("X")')`            | `d(textContains="X")`                                                            |                                                       |
+| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*X.*")')`         | `d(textMatches=".*X.*")`                                                         |                                                       |
+| `driver.find_element(AppiumBy.ANDROID_UIAUTOMATOR, '...className("X").clickable(true).instance(N)')` | `d(className="X", clickable=True, instance=N)`                                   |                                                       |
+| `driver.find_element(By.XPATH, '//*[@text="X"]')`                                                    | `d.xpath('//*[@text="X"]').get_element()`                                        |                                                       |
+| `driver.find_elements(By.CLASS_NAME, "android.widget.FrameLayout")`                                  | `list(d(className="android.widget.FrameLayout"))`                                |                                                       |
+| `container.find_elements(By.CLASS_NAME, "X")`                                                        | `list(container.child(className="X"))`                                           | container 为 u2 selector，不是 element                |
+| `container.find_elements(By.ID, "cn.damai:id/foo")`                                                  | `list(container.child(resourceId="cn.damai:id/foo"))`                            | 同上                                                  |
+| `container.find_elements(By.XPATH, ".//*")`                                                          | `d.xpath(absolute_xpath + '//*').all()`                                          | u2 不支持相对 XPath；需先获取容器绝对 XPath 或 bounds |
+| `element.rect` → `{'x','y','width','height'}`                                                        | `el.info['bounds']` → `{'left','top','right','bottom'}` + `_element_rect()` 转换 | 见下方                                                |
+| `element.text`                                                                                       | `el.get_text()` 或 `el.info['text']`                                             |                                                       |
+| `element.get_attribute("clickable")`                                                                 | `el.info.get('clickable', False)`                                                | 返回 bool，删除 `.lower() == "true"` 转换             |
+| `element.get_attribute("checked")`                                                                   | `el.info.get('checked', False)`                                                  | 同上，用于 checkbox 状态                              |
+| `execute_script("mobile: clickGesture", {"x":x,"y":y})`                                              | `d.click(x, y)`                                                                  | duration≤50 直接 click                                |
+| `execute_script("mobile: clickGesture", {"elementId": el.id})`                                       | 获取 `el.info['bounds']` 计算中心坐标，再 `d.click(cx, cy)`                      | u2 无 elementId 概念                                  |
+| `execute_script("mobile: swipeGesture", {...})`                                                      | `d.swipe(fx, fy, tx, ty, duration)`                                              | 参数格式不同，需换算                                  |
+| `driver.current_activity`                                                                            | `d.app_current()['activity']`                                                    |                                                       |
+| `driver.update_settings({...})`                                                                      | `d.settings[key] = value`                                                        | key 名称有差异，见下方                                |
+| `WebDriverWait(driver, t).until(EC.presence_of_element_located(...))`                                | `d(...).wait(timeout=t)` 返回 bool                                               |                                                       |
+| `driver.page_source`                                                                                 | `d.dump_hierarchy()`                                                             | 返回 XML 字符串，格式相同                             |
+| `driver.get_screenshot_as_file(path)`                                                                | `d.screenshot(path)`                                                             |                                                       |
+| `driver.press_keycode(keycode)`                                                                      | `d.press(keycode)`                                                               |                                                       |
+| `driver.activate_app(package)`                                                                       | `d.app_start(package, stop=False)`                                               |                                                       |
 
 ### settings 映射
 
-| Appium `update_settings` key | u2 等价 |
-|---|---|
-| `waitForIdleTimeout: 0` | `d.settings['wait_timeout'] = 0` |
-| `waitForSelectorTimeout: 100` | 无直接等价；u2 默认每次 `.wait()` 超时由调用方传入，整体已足够激进 |
-| `actionAcknowledgmentTimeout: 0` | 无直接等价，u2 默认已足够激进 |
-| `keyInjectionDelay: 0` | `d.settings['key_injection_delay'] = 0` |
-| `disableWindowAnimation: True` | 通过 `adb shell settings put global window_animation_scale 0` 等 adb 命令设置 |
+| Appium `update_settings` key     | u2 等价                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `waitForIdleTimeout: 0`          | `d.settings['wait_timeout'] = 0`                                              |
+| `waitForSelectorTimeout: 100`    | 无直接等价；u2 默认每次 `.wait()` 超时由调用方传入，整体已足够激进            |
+| `actionAcknowledgmentTimeout: 0` | 无直接等价，u2 默认已足够激进                                                 |
+| `keyInjectionDelay: 0`           | `d.settings['key_injection_delay'] = 0`                                       |
+| `disableWindowAnimation: True`   | 通过 `adb shell settings put global window_animation_scale 0` 等 adb 命令设置 |
 
 ---
 
@@ -279,6 +286,7 @@ def __init__(self, ...,
 ```
 
 **`server_url` 校验逻辑改为条件校验：**
+
 ```python
 if driver_backend == "appium":
     validate_url(server_url, "server_url")
@@ -287,6 +295,7 @@ if driver_backend == "appium":
 **注意**：`update_runtime_mode()` 函数签名和行为不变，只是增量添加新字段的读取。
 
 **`Config.load_config()` 新增字段读取：**
+
 ```python
 return Config(...,
               config.get('serial'),
@@ -295,10 +304,11 @@ return Config(...,
 ```
 
 **`config.jsonc` 新增/变更字段：**
+
 ```jsonc
 {
-  "serial": null,            // 新增：null = 自动检测；或填 "emulator-5554" / "c6c4eb67"
-  "driver_backend": "u2",   // 新增：回滚开关，"u2"（默认）| "appium"
+  "serial": null, // 新增：null = 自动检测；或填 "emulator-5554" / "c6c4eb67"
+  "driver_backend": "u2", // 新增：回滚开关，"u2"（默认）| "appium"
   // "server_url": "http://127.0.0.1:4723",  // 变为可选，driver_backend="appium" 时才需要
   // 删除 platform_version（u2 不需要）
 }
@@ -484,6 +494,7 @@ def _has_element(self, by, value):
 #### 本步骤替换范围（15 处，无 container 子查找）
 
 以下调用可以安全替换为 `_find()` / `_find_all()`：
+
 - `driver.find_elements(By.ID, "cn.damai:id/checkbox")` ← 3 处
 - `driver.find_elements(By.ID, "cn.damai:id/ll_search_item")` ← 2 处
 - `driver.find_elements(By.ID, "cn.damai:id/tv_date")` ← 1 处
@@ -493,6 +504,7 @@ def _has_element(self, by, value):
 - UiSelector 文本查找（`_attendee_required_count`、`dismiss_startup_popups`、城市/日期选择）← 其余
 
 `get_attribute("clickable")` / `get_attribute("checked")` 改写（共 4 处）：
+
 ```python
 # 改为（u2 的 info 直接是 bool，删除 .lower() == "true" 转换）
 el.info.get('clickable', False)
@@ -508,6 +520,7 @@ el.info.get('checked', False)
 这是改动最复杂的部分，涉及 7 处 `container.find_elements()` 和 3 个辅助方法。
 
 **受影响的方法**：
+
 - `_get_price_option_coordinates_by_config_index()` — `price_container.find_element()` + `price_container.find_elements()`
 - `_click_visible_price_option()` — `price_container.find_elements()`
 - `get_visible_price_options()` — `price_container.find_elements()`
@@ -518,6 +531,7 @@ el.info.get('checked', False)
 **迁移策略**：
 
 对于 `container.find_elements(By.CLASS_NAME/By.ID, ...)` ← u2 有 `.child()` API：
+
 ```python
 # 原来
 cards = price_container.find_elements(By.CLASS_NAME, "android.widget.FrameLayout")
@@ -526,6 +540,7 @@ cards = list(price_container.child(className="android.widget.FrameLayout"))
 ```
 
 对于 `container.find_elements(By.XPATH, ".//*")` ← u2 不支持相对 XPath，两种方案：
+
 ```python
 # 方案 A：从容器 bounds 构造绝对 XPath（较脆，依赖坐标稳定）
 bounds = container.info['bounds']
@@ -536,6 +551,7 @@ cards = d.xpath(f'//node[@bounds="{bounds_str}"]/*').all()
 ```
 
 对于 `_safe_element_text(card, By.ID, resource_id)` 中 `card` 是搜索结果 element 的情况：
+
 - 改为先获取 card 的 bounds，用 `d(resourceId=resource_id).within(bounds)` 或直接绝对路径查找
 
 **验证**：`get_visible_price_options()` 返回结果与 Appium 版一致；搜索结果评分测试通过。
@@ -617,16 +633,16 @@ def mock_u2_driver(mocker):
 
 ## 改动量估算
 
-| 文件 | 预计净改动行数 | 主要内容 |
-|---|---|---|
-| `damai_app.py` | ~150–200 行 | Step 3–5：driver 初始化分支、`_element_rect`、`_find`/`_find_all`、API 替换 |
-| `config.py` | ~20 行 | Step 2：新增 2 字段，条件校验 |
-| `conftest.py` | ~30 行 | Step 7：新增 `mock_u2_driver` fixture |
-| `test_mobile_damai_app.py` | ~150–200 行 | Step 7：新增 u2 路径测试 |
-| `test_mobile_config.py` | ~40 行 | Step 7：新增字段测试 |
-| `pyproject.toml` | ~3 行 | Step 1：依赖变更 |
-| shell 脚本 | ~10 行 | Step 6：替换 Appium 检查 |
-| **合计** | **~400–500 行** | 瓶颈在 Step 5b 的 container 查找重构 |
+| 文件                       | 预计净改动行数  | 主要内容                                                                    |
+| -------------------------- | --------------- | --------------------------------------------------------------------------- |
+| `damai_app.py`             | ~150–200 行     | Step 3–5：driver 初始化分支、`_element_rect`、`_find`/`_find_all`、API 替换 |
+| `config.py`                | ~20 行          | Step 2：新增 2 字段，条件校验                                               |
+| `conftest.py`              | ~30 行          | Step 7：新增 `mock_u2_driver` fixture                                       |
+| `test_mobile_damai_app.py` | ~150–200 行     | Step 7：新增 u2 路径测试                                                    |
+| `test_mobile_config.py`    | ~40 行          | Step 7：新增字段测试                                                        |
+| `pyproject.toml`           | ~3 行           | Step 1：依赖变更                                                            |
+| shell 脚本                 | ~10 行          | Step 6：替换 Appium 检查                                                    |
+| **合计**                   | **~400–500 行** | 瓶颈在 Step 5b 的 container 查找重构                                        |
 
 ---
 
@@ -650,18 +666,18 @@ poetry run pytest --cov-fail-under=80
 
 ## 风险点与缓解
 
-| 风险 | 影响范围 | 缓解措施 |
-|---|---|---|
-| `container.find_elements(By.XPATH, ".//*")` 在 u2 中不支持 | `_collect_descendant_texts()`（冷路径：价格文本读取、详情页标题）| Step 5b 改用 `dump_hierarchy()` 解析；冷路径可先用 `driver_backend="appium"` 回退 |
-| `container.child()` 行为与 Appium 子查找不完全一致 | 价格卡片 clickable 过滤逻辑 | 逐一验证 `_get_price_option_coordinates_by_config_index()` 返回坐标正确 |
-| UiSelector 复杂表达式解析不完整 | `_parse_uiselector()` 漏掉某些组合 | 遇到 ValueError 时逐一补充；提供明确异常信息；当前已覆盖所有实际用到的模式 |
-| `get_attribute("clickable"/"checked")` 返回类型变化 | 价格卡片过滤、checkbox 状态读取 | 改为 `el.info.get('clickable/checked', False)`，直接用 bool，删 `.lower()` 转换 |
-| ATX Agent 在连接时自动升级 | 首次 `u2.connect()` 可能触发设备端安装/升级（需联网） | 生产前手动 `python -m uiautomator2 init`；在 `_setup_u2_driver()` 中注释说明 |
-| rush_mode 热路径行为改变 | 抢票成功率敏感 | Step 5a 完成后必须跑 `benchmark_hot_path.sh`，对比迁移前后耗时；不得在热路径引入新等待 |
-| `StepTimelineRecorder` 依赖 logger 名称 | benchmark 步骤计时失效 | u2 版本的 logger 名称需与 `"mobile.damai_app"` / `"damai_app"` 保持一致 |
-| `burst_count = 1`（validation 模式）被意外恢复 | 测试断言失败 + 开发验证路径双击提交 | 测试已有 `count=1` 断言保护；code review 时重点检查 |
-| `_select_price_option_by_text_or_index()` 的 elementId 调用 | 文本匹配失败的备用路径 | Step 4 中统一改为 bounds 坐标点击；rush_mode 不走此路径，不影响热路径 |
-| 模拟器硬件指纹被风控检测 | 正式抢票静默失败 | 迁移全程在真机上验证；benchmark 数据只信真机数据 |
+| 风险                                                        | 影响范围                                                          | 缓解措施                                                                               |
+| ----------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| `container.find_elements(By.XPATH, ".//*")` 在 u2 中不支持  | `_collect_descendant_texts()`（冷路径：价格文本读取、详情页标题） | Step 5b 改用 `dump_hierarchy()` 解析；冷路径可先用 `driver_backend="appium"` 回退      |
+| `container.child()` 行为与 Appium 子查找不完全一致          | 价格卡片 clickable 过滤逻辑                                       | 逐一验证 `_get_price_option_coordinates_by_config_index()` 返回坐标正确                |
+| UiSelector 复杂表达式解析不完整                             | `_parse_uiselector()` 漏掉某些组合                                | 遇到 ValueError 时逐一补充；提供明确异常信息；当前已覆盖所有实际用到的模式             |
+| `get_attribute("clickable"/"checked")` 返回类型变化         | 价格卡片过滤、checkbox 状态读取                                   | 改为 `el.info.get('clickable/checked', False)`，直接用 bool，删 `.lower()` 转换        |
+| ATX Agent 在连接时自动升级                                  | 首次 `u2.connect()` 可能触发设备端安装/升级（需联网）             | 生产前手动 `python -m uiautomator2 init`；在 `_setup_u2_driver()` 中注释说明           |
+| rush_mode 热路径行为改变                                    | 抢票成功率敏感                                                    | Step 5a 完成后必须跑 `benchmark_hot_path.sh`，对比迁移前后耗时；不得在热路径引入新等待 |
+| `StepTimelineRecorder` 依赖 logger 名称                     | benchmark 步骤计时失效                                            | u2 版本的 logger 名称需与 `"mobile.damai_app"` / `"damai_app"` 保持一致                |
+| `burst_count = 1`（validation 模式）被意外恢复              | 测试断言失败 + 开发验证路径双击提交                               | 测试已有 `count=1` 断言保护；code review 时重点检查                                    |
+| `_select_price_option_by_text_or_index()` 的 elementId 调用 | 文本匹配失败的备用路径                                            | Step 4 中统一改为 bounds 坐标点击；rush_mode 不走此路径，不影响热路径                  |
+| 模拟器硬件指纹被风控检测                                    | 正式抢票静默失败                                                  | 迁移全程在真机上验证；benchmark 数据只信真机数据                                       |
 
 ---
 

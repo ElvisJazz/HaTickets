@@ -11,8 +11,9 @@ import re
 import time
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.common.by import By
+
+from mobile.ui_primitives import ANDROID_UIAUTOMATOR
 from selenium.common.exceptions import TimeoutException
 
 from mobile.logger import get_logger
@@ -122,7 +123,7 @@ class EventNavigator:
             (By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"),
             (By.ID, "cn.damai:id/homepage_header_search"),
             (By.ID, "cn.damai:id/homepage_header_search_layout"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("搜索")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("搜索")'),
         ]
 
         for by, value in search_selectors:
@@ -184,9 +185,9 @@ class EventNavigator:
 
             if not bot._press_keycode_safe(66, context="提交搜索关键词"):
                 return False
-            if bot._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
+            if bot._has_element(ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
                 bot.smart_wait_and_click(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    ANDROID_UIAUTOMATOR,
                     'new UiSelector().text("演出")',
                     timeout=0.8,
                 )

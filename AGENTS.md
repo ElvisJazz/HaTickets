@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`mobile/` is the primary automation path and contains the Appium bot, prompt parsing, config loading, and helper scripts. `web/` is the Selenium-based fallback flow. `shared/` holds Python utilities reused across both modules. `desktop/` is a legacy Tauri app (`desktop/src` for Vue, `desktop/src-tauri` for Rust); keep changes there narrowly scoped unless the task explicitly targets it. Tests live in `tests/unit/`, `tests/integration/`, and `tests/conftest.py`. Reference docs and design notes live in `docs/`.
+`mobile/` is the primary automation path and contains the uiautomator2 (u2) bot, prompt parsing, config loading, and helper scripts. `web/` is the Selenium-based fallback flow. `shared/` holds Python utilities reused across both modules. `desktop/` is a legacy Tauri app (`desktop/src` for Vue, `desktop/src-tauri` for Rust); keep changes there narrowly scoped unless the task explicitly targets it. Tests live in `tests/unit/`, `tests/integration/`, and `tests/conftest.py`. Reference docs and design notes live in `docs/`.
 
 ## Build, Test, and Development Commands
 Run Python work from the repo root:
@@ -13,7 +13,7 @@ poetry run pytest -m unit
 poetry run pytest tests/unit/test_mobile_config.py
 ```
 
-Use `web/scripts/check_environment.sh` to validate local prerequisites. For mobile runs, start Appium with `mobile/scripts/start_appium.sh`, then execute `mobile/scripts/start_ticket_grabbing.sh --yes`. Desktop maintenance uses `cd desktop && yarn install && yarn tauri dev`; build with `yarn tauri build`.
+Use `web/scripts/check_environment.sh` to validate local prerequisites. For mobile runs, connect an Android device via USB with debugging enabled, then execute `mobile/scripts/start_ticket_grabbing.sh --yes`. Desktop maintenance uses `cd desktop && yarn install && yarn tauri dev`; build with `yarn tauri build`.
 
 ## Coding Style & Naming Conventions
 Follow the existing style in each module rather than introducing a new one. Python uses 4-space indentation, `snake_case` functions, `PascalCase` classes, and small focused helpers. Vue components use `PascalCase` filenames such as `Form.vue`; JS modules use `camelCase` exports and currently favor double quotes plus semicolons. Rust code uses `snake_case` functions and standard `cargo fmt` layout even though no repo-wide formatter is checked in.

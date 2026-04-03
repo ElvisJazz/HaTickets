@@ -34,18 +34,6 @@ else
     exit 1
 fi
 
-# 检查Appium
-echo ""
-echo "🤖 检查Appium..."
-if command -v appium &> /dev/null; then
-    APPIUM_VERSION=$(appium --version)
-    echo "✅ Appium: $APPIUM_VERSION"
-else
-    echo "❌ Appium未安装"
-    echo "   安装命令: npm install -g appium"
-    exit 1
-fi
-
 # 检查Android SDK
 echo ""
 echo "📱 检查Android SDK..."
@@ -94,26 +82,16 @@ else
     fi
 fi
 
-# 检查Appium服务器
-echo ""
-echo "🌐 检查Appium服务器..."
-if curl -s http://127.0.0.1:4723/status > /dev/null; then
-    echo "✅ Appium服务器正在运行"
-else
-    echo "⚠️  Appium服务器未运行"
-    echo "   启动命令: ./start_appium.sh"
-fi
-
 # 检查配置文件
 echo ""
 echo "📋 检查配置文件..."
-if [ -f "damai_appium/config.jsonc" ]; then
-    echo "✅ 配置文件存在"
+if [ -f "mobile/config.jsonc" ]; then
+    echo "✅ Mobile 配置文件存在"
     echo "   当前配置:"
-    cat damai_appium/config.jsonc | grep -E '"keyword"|"city"|"users"' | head -3 | sed 's/^/   /'
+    cat mobile/config.jsonc | grep -E '"keyword"|"city"|"users"' | head -3 | sed 's/^/   /'
 else
-    echo "❌ 配置文件不存在"
-    echo "   请创建 damai_appium/config.jsonc 文件"
+    echo "⚠️  Mobile 配置文件不存在"
+    echo "   请创建 mobile/config.jsonc 文件（可参考 mobile/config.example.jsonc）"
 fi
 
 echo ""
@@ -121,6 +99,6 @@ echo "================================"
 echo "🎯 环境检查完成！"
 echo ""
 echo "📝 使用说明:"
-echo "   1. 启动Appium: ./start_appium.sh"
-echo "   2. 开始抢票: ./start_ticket_grabbing.sh"
+echo "   1. 开始抢票: ./mobile/scripts/start_ticket_grabbing.sh --yes"
+echo "   2. NLP 模式: ./mobile/scripts/run_from_prompt.sh --mode probe --yes \"prompt\""
 echo ""
