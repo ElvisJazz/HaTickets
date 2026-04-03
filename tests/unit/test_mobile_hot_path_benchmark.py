@@ -23,10 +23,7 @@ from mobile.hot_path_benchmark import (
 
 def _make_config():
     return Config(
-        server_url="http://127.0.0.1:4723",
-        device_name="Android",
-        udid="ABC123",
-        platform_version="16",
+        serial="ABC123",
         app_package="cn.damai",
         app_activity=".launcher.splash.SplashMainActivity",
         keyword="旧关键词",
@@ -39,8 +36,6 @@ def _make_config():
         probe_only=True,
         auto_navigate=True,
         rush_mode=False,
-        item_url="https://example.com/item",
-        item_id="123456",
         target_title="旧标题",
         target_venue="旧场馆",
     )
@@ -166,12 +161,10 @@ def test_build_benchmark_config_forces_safe_manual_mode():
     assert cfg.probe_only is False
     assert cfg.auto_navigate is False
     assert cfg.rush_mode is True
-    assert cfg.item_url is None
-    assert cfg.item_id is None
     assert cfg.target_title is None
     assert cfg.target_venue is None
     assert cfg.users == ["张志涛"]
-    assert cfg.udid == "ABC123"
+    assert cfg.serial == "ABC123"
 
 
 class TestBuildBenchmarkConfigNoneArgs:
@@ -353,7 +346,8 @@ class TestFastRecoverNoOvershoot:
         assert bot.d.shell.call_count == 3
         bot.probe_current_page.assert_called_once()
 
-    def test_appium_fallback_incremental(self):
+    def test_non_u2_fallback_incremental(self):
+        """Non-u2 backend falls back to _press_keycode_safe for back navigation."""
         bot = _make_bot_for_recovery(
             find_all_side_effect=[[], ["element"]],
             using_u2=False,

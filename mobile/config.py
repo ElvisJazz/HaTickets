@@ -113,22 +113,19 @@ def update_runtime_mode(probe_only, if_commit_order, config_path=None):
 
 
 class Config:
-    def __init__(self, server_url, keyword, users, city, date, price, price_index, if_commit_order,
-                 probe_only=False, device_name="Android", udid=None, platform_version=None,
+    def __init__(self, keyword, users, city, date, price, price_index, if_commit_order,
+                 probe_only=False,
                  app_package="cn.damai", app_activity=".launcher.splash.SplashMainActivity",
                  sell_start_time=None, countdown_lead_ms=3000,
                  wait_cta_ready_timeout_ms=0,
                  fast_retry_count=8, fast_retry_interval_ms=120,
                  rush_mode=False,
-                 item_url=None, item_id=None, auto_navigate=True,
+                 auto_navigate=True,
                  target_title=None, target_venue=None,
-                 serial=None, driver_backend="u2"):
-        if driver_backend not in {"u2", "appium"}:
-            raise ValueError(f"driver_backend 必须是 'u2' 或 'appium'，实际值: {driver_backend!r}")
-
-        # Validate server_url (required only for appium backend)
-        if driver_backend == "appium":
-            validate_url(server_url, "server_url")
+                 serial=None,
+                 # Deprecated Appium-era params — accepted for config file compat, ignored
+                 driver_backend="u2", server_url=None, device_name="Android",
+                 udid=None, platform_version=None):
 
         # Validate users
         validate_non_empty_list(users, "users")
@@ -137,11 +134,8 @@ class Config:
         if not isinstance(price_index, int) or isinstance(price_index, bool) or price_index < 0:
             raise ValueError(f"price_index 必须是非负整数，实际值: {price_index!r}")
 
-        has_item_reference = item_url is not None or item_id is not None
-        if keyword is not None and (not isinstance(keyword, str) or len(keyword.strip()) == 0):
-            raise ValueError(f"keyword 必须是非空字符串或 null，实际值: {keyword!r}")
-        if keyword is None and not has_item_reference:
-            raise ValueError("keyword 不能为空；如果不提供 keyword，至少需要提供 item_url 或 item_id")
+        if keyword is None or not isinstance(keyword, str) or len(keyword.strip()) == 0:
+            raise ValueError(f"keyword 不能为空，必须是非空字符串，实际值: {keyword!r}")
 
         if not isinstance(if_commit_order, bool):
             raise ValueError(f"if_commit_order 必须是布尔值，实际值: {if_commit_order!r}")
@@ -149,29 +143,14 @@ class Config:
         if not isinstance(probe_only, bool):
             raise ValueError(f"probe_only 必须是布尔值，实际值: {probe_only!r}")
 
-        if not isinstance(device_name, str) or len(device_name.strip()) == 0:
-            raise ValueError(f"device_name 必须是非空字符串，实际值: {device_name!r}")
-
-        if udid is not None and (not isinstance(udid, str) or len(udid.strip()) == 0):
-            raise ValueError(f"udid 必须是非空字符串或 null，实际值: {udid!r}")
-
         if serial is not None and (not isinstance(serial, str) or len(serial.strip()) == 0):
             raise ValueError(f"serial 必须是非空字符串或 null，实际值: {serial!r}")
-
-        if platform_version is not None and (not isinstance(platform_version, str) or len(platform_version.strip()) == 0):
-            raise ValueError(f"platform_version 必须是非空字符串或 null，实际值: {platform_version!r}")
 
         if not isinstance(app_package, str) or len(app_package.strip()) == 0:
             raise ValueError(f"app_package 必须是非空字符串，实际值: {app_package!r}")
 
         if not isinstance(app_activity, str) or len(app_activity.strip()) == 0:
             raise ValueError(f"app_activity 必须是非空字符串，实际值: {app_activity!r}")
-
-        if item_url is not None:
-            validate_url(item_url, "item_url")
-
-        if item_id is not None and (not isinstance(item_id, str) or not item_id.strip().isdigit()):
-            raise ValueError(f"item_id 必须是纯数字字符串或 null，实际值: {item_id!r}")
 
         if not isinstance(auto_navigate, bool):
             raise ValueError(f"auto_navigate 必须是布尔值，实际值: {auto_navigate!r}")
@@ -212,8 +191,7 @@ class Config:
         if not isinstance(rush_mode, bool):
             raise ValueError(f"rush_mode 必须是布尔值，实际值: {rush_mode!r}")
 
-        self.server_url = server_url
-        self.keyword = keyword.strip() if isinstance(keyword, str) else None
+        self.keyword = keyword.strip()
         self.users = users
         self.city = city
         self.date = date
@@ -221,9 +199,6 @@ class Config:
         self.price_index = price_index
         self.if_commit_order = if_commit_order
         self.probe_only = probe_only
-        self.device_name = device_name
-        self.udid = udid
-        self.platform_version = platform_version
         self.app_package = app_package
         self.app_activity = app_activity
         self.sell_start_time = sell_start_time
@@ -232,27 +207,17 @@ class Config:
         self.fast_retry_count = fast_retry_count
         self.fast_retry_interval_ms = fast_retry_interval_ms
         self.rush_mode = rush_mode
-        self.item_url = item_url
-        self.item_id = item_id
         self.auto_navigate = auto_navigate
         self.target_title = target_title.strip() if isinstance(target_title, str) else None
         self.target_venue = target_venue.strip() if isinstance(target_venue, str) else None
         self.serial = serial.strip() if isinstance(serial, str) else None
-        self.driver_backend = driver_backend
 
     def to_dict(self):
         """Return the config as a plain dictionary for rewriting config.jsonc."""
         return {
-            "driver_backend": self.driver_backend,
             "serial": self.serial,
-            "server_url": self.server_url,
-            "device_name": self.device_name,
-            "udid": self.udid,
-            "platform_version": self.platform_version,
             "app_package": self.app_package,
             "app_activity": self.app_activity,
-            "item_url": self.item_url,
-            "item_id": self.item_id,
             "keyword": self.keyword,
             "target_title": self.target_title,
             "target_venue": self.target_venue,
@@ -276,41 +241,33 @@ class Config:
     def load_config(config_path=None):
         config = load_config_dict(config_path)
 
-        driver_backend = config.get("driver_backend", "u2")
         required_keys = ['users', 'city', 'date', 'price', 'price_index', 'if_commit_order']
-        if driver_backend == "appium":
-            required_keys.append("server_url")
         missing = [k for k in required_keys if k not in config]
         if missing:
             raise KeyError(f"配置文件缺少必需字段: {', '.join(missing)}")
 
-        if "keyword" not in config and "item_url" not in config and "item_id" not in config:
-            raise KeyError("配置文件缺少必需字段: keyword 或 item_url 或 item_id")
+        if "keyword" not in config:
+            raise KeyError("配置文件缺少必需字段: keyword")
 
-        return Config(config.get('server_url'),
-                      config.get('keyword'),
-                      config['users'],
-                      config['city'],
-                      config['date'],
-                      config['price'],
-                      config['price_index'],
-                      config['if_commit_order'],
-                      config.get('probe_only', False),
-                      config.get('device_name', 'Android'),
-                      config.get('udid'),
-                      config.get('platform_version'),
-                      config.get('app_package', 'cn.damai'),
-                      config.get('app_activity', '.launcher.splash.SplashMainActivity'),
-                      config.get('sell_start_time'),
-                      config.get('countdown_lead_ms', 3000),
-                      config.get('wait_cta_ready_timeout_ms', 0),
-                      config.get('fast_retry_count', 8),
-                      config.get('fast_retry_interval_ms', 120),
-                      config.get('rush_mode', False),
-                      config.get('item_url'),
-                      config.get('item_id'),
-                      config.get('auto_navigate', True),
-                      config.get('target_title'),
-                      config.get('target_venue'),
-                      config.get('serial'),
-                      driver_backend)
+        return Config(
+            keyword=config.get('keyword'),
+            users=config['users'],
+            city=config['city'],
+            date=config['date'],
+            price=config['price'],
+            price_index=config['price_index'],
+            if_commit_order=config['if_commit_order'],
+            probe_only=config.get('probe_only', False),
+            app_package=config.get('app_package', 'cn.damai'),
+            app_activity=config.get('app_activity', '.launcher.splash.SplashMainActivity'),
+            sell_start_time=config.get('sell_start_time'),
+            countdown_lead_ms=config.get('countdown_lead_ms', 3000),
+            wait_cta_ready_timeout_ms=config.get('wait_cta_ready_timeout_ms', 0),
+            fast_retry_count=config.get('fast_retry_count', 8),
+            fast_retry_interval_ms=config.get('fast_retry_interval_ms', 120),
+            rush_mode=config.get('rush_mode', False),
+            auto_navigate=config.get('auto_navigate', True),
+            target_title=config.get('target_title'),
+            target_venue=config.get('target_venue'),
+            serial=config.get('serial'),
+        )

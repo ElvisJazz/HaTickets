@@ -11,15 +11,14 @@
 ## 当前状态
 
 - `Mobile`：当前主推方案，也是 README 主要说明对象
-- `Web`：保留，适合会调 Selenium 的用户
+- ~~`Web`~~：**已移除** — 大麦网页端风控升级后 Selenium 方案已不可用，代码已从仓库删除
 - `Desktop`：**已被官方渠道限制，当前视为不可用，不再推荐，也不要作为主流程投入时间**
 
 ## 方案状态
 
-| 方案 | 目录 | 当前状态 | 说明 |
-|------|------|--------|------|
-| `Mobile` | `mobile/` | 主推 | UIAutomator2 直连 Android 大麦 App，无需额外服务 |
-| `Web` | `web/` | 可用但次选 | Selenium 控制 Chrome |
+| 方案          | 目录           | 当前状态   | 说明                                                   |
+| ------------- | -------------- | ---------- | ------------------------------------------------------ |
+| `Mobile`      | `mobile/`      | 主推       | UIAutomator2 直连 Android 大麦 App，无需额外服务       |
 | ~~`Desktop`~~ | ~~`desktop/`~~ | ~~不可用~~ | ~~官方渠道和风控已限制，当前不要再作为可执行方案使用~~ |
 
 > 如果你是第一次用，直接走 `Mobile + 安卓真机`。
@@ -90,6 +89,7 @@ adb devices
 - 你要用到的观演人已经在大麦 App 里添加成功
 
 #### 3.1 自动配置
+
 如果你不想一开始就手改配置，可以先用自然语言入口。前面 2 个步骤都完成后，再看这一节。
 
 先记住这几条：
@@ -170,7 +170,7 @@ cp mobile/config.example.jsonc mobile/config.jsonc
   "price_index": 0,
   "if_commit_order": false,
   "probe_only": true,
-  "auto_navigate": true
+  "auto_navigate": true,
 }
 ```
 
@@ -393,17 +393,6 @@ export PATH="$ANDROID_HOME/platform-tools:$PATH"
 
 ## 其他方案
 
-### Web 端
-
-适合已经熟悉 Selenium 的人。它还在仓库里，但不再是默认推荐路线。
-
-```bash
-cd web
-python damai.py
-```
-
-首次运行会打开 Chrome 登录，配置文件是 [web/config.json](./web/config.json)。
-
 ### Desktop 端
 
 `Desktop` 方案保留代码和历史文档，但当前已经不作为可用方案推荐。
@@ -427,7 +416,6 @@ yarn tauri dev
 ```text
 HaTickets/
 ├── mobile/                  # Android App 自动化
-├── web/                     # Selenium 浏览器自动化
 ├── desktop/                 # Tauri + Rust 桌面端
 ├── docs/                    # 文档、流程图、说明图
 ├── tests/                   # pytest 测试

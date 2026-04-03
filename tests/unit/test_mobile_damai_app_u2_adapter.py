@@ -5,9 +5,10 @@ import pytest
 import xml.etree.ElementTree as ET
 from unittest.mock import Mock, patch
 
-from appium.webdriver.common.appiumby import AppiumBy
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
+
+from mobile.ui_primitives import ANDROID_UIAUTOMATOR
 
 from mobile.config import Config
 from mobile.damai_app import DamaiBot
@@ -31,26 +32,6 @@ def _u2_config():
         if_commit_order=False,
         probe_only=True,
         driver_backend="u2",
-    )
-
-
-def _appium_config():
-    return Config(
-        server_url="http://127.0.0.1:4723",
-        device_name="Android",
-        udid=None,
-        platform_version=None,
-        app_package="cn.damai",
-        app_activity=".launcher.splash.SplashMainActivity",
-        keyword="test",
-        users=["UserA"],
-        city="深圳",
-        date="12.06",
-        price="799元",
-        price_index=1,
-        if_commit_order=False,
-        probe_only=True,
-        driver_backend="appium",
     )
 
 
@@ -92,19 +73,13 @@ class TestU2SetupAndCoreAdapters:
         result = bot._find_all(By.ID, "cn.damai:id/checkbox")
         assert result == expected
 
-    def test_find_all_appium_non_iterable_returns_empty(self):
-        bot = DamaiBot(config=_appium_config(), setup_driver=False)
-        bot.driver = Mock()
-        bot.driver.find_elements.return_value = Mock()
-        assert bot._find_all(By.ID, "cn.damai:id/checkbox") == []
-
     def test_parse_uiselector_supports_index_and_clickable(self):
         bot = DamaiBot(config=_u2_config(), setup_driver=False)
         bot.d = Mock(return_value="selector")
         bot.driver = bot.d
 
         selector = bot._appium_selector_to_u2(
-            AppiumBy.ANDROID_UIAUTOMATOR,
+            ANDROID_UIAUTOMATOR,
             'new UiSelector().className("android.widget.FrameLayout").index(2).clickable(true)',
         )
         assert selector == "selector"

@@ -45,9 +45,9 @@ else
     CONFIG_FILE="$DEFAULT_CONFIG_FILE"
 fi
 
-if ! curl -s http://127.0.0.1:4723/status > /dev/null; then
-    echo "❌ Appium服务器未运行"
-    echo "   请先运行: ./mobile/scripts/start_appium.sh"
+if ! adb devices 2>/dev/null | grep -q "device$"; then
+    echo "❌ 未检测到已连接的 Android 设备"
+    echo "   请通过 USB 连接设备并开启 USB 调试模式"
     exit 1
 fi
 

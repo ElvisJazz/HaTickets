@@ -119,30 +119,12 @@ extract_bool_flag() {
     fi
 }
 
-extract_backend_flag() {
-    if grep -Eq '"driver_backend"[[:space:]]*:[[:space:]]*"appium"' "$CONFIG_FILE"; then
-        printf 'appium\n'
-    else
-        printf 'u2\n'
-    fi
-}
-
-DRIVER_BACKEND="$(extract_backend_flag)"
-if [ "$DRIVER_BACKEND" = "appium" ]; then
-    if ! curl -s http://127.0.0.1:4723/status > /dev/null; then
-        echo "❌ Appium服务器未运行（driver_backend=appium）"
-        echo "   请先运行: ./start_appium.sh"
-        exit 1
-    fi
-    echo "✅ Appium服务器运行正常"
-else
-    if ! adb devices 2>/dev/null | grep -q "device$"; then
-        echo "❌ 未检测到已连接的 Android 设备"
-        echo "   请通过 USB 连接设备并开启 USB 调试模式"
-        exit 1
-    fi
-    echo "✅ Android 设备连接正常"
+if ! adb devices 2>/dev/null | grep -q "device$"; then
+    echo "❌ 未检测到已连接的 Android 设备"
+    echo "   请通过 USB 连接设备并开启 USB 调试模式"
+    exit 1
 fi
+echo "✅ Android 设备连接正常"
 
 prompt_mode_switch() {
     local message="$1"

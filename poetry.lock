@@ -22,20 +22,6 @@ requests = "*"
 retry2 = ">=0.9,<1.0"
 
 [[package]]
-name = "appium-python-client"
-version = "4.5.1"
-description = "Python client for Appium"
-optional = false
-python-versions = "*"
-groups = ["main"]
-files = [
-    {file = "appium_python_client-4.5.1.tar.gz", hash = "sha256:9222218a162e480427fda9aebad5250c1bfe77ae04f95f42376a4d983b850656"},
-]
-
-[package.dependencies]
-selenium = ">=4.26,<5.0"
-
-[[package]]
 name = "attrs"
 version = "25.3.0"
 description = "Classes Without Boilerplate"
@@ -1167,4 +1153,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.8"
-content-hash = "14cd7f8f0f0706cf67fabc8ef0e1ef609736d75a74907a973b9cdc6b9c3b1340"
+content-hash = "c45b6771602cb4f7ea04005861622e220e4e097e183669ff98aa728fcde65735"

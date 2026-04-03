@@ -44,7 +44,7 @@ jobs:
         run: poetry install
 
       - name: Run tests with coverage
-        run: poetry run pytest --cov=web --cov=mobile --cov-report=xml --cov-fail-under=80
+        run: poetry run pytest --cov=mobile --cov-report=xml --cov-fail-under=80
 
       - name: Upload coverage report
         if: matrix.python-version == '3.12'

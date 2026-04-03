@@ -3,6 +3,7 @@
 > 源码目录: `tickets-master/`
 >
 > **重要说明**
+>
 > - 这份文档保留的是 `desktop` 的历史实现
 > - 当前官方渠道限制和风控变化，已经让这条路线不再作为实际可用方案推荐
 > - 如果你的目标是现在跑通抢票流程，请回到 `mobile/`
@@ -24,51 +25,53 @@ Rust 后端 (HTTP 请求代理)
 大麦 mtop API (mtop.damai.cn)
 ```
 
-与 Web/Mobile 方案的根本区别：**不操作任何 UI，直接调用大麦的 H5 API 接口**。
+与 Mobile 方案的根本区别：**不操作任何 UI，直接调用大麦的 H5 API 接口**。
 
 ## 模块结构
 
 ### Rust 后端 (`src-tauri/src/`)
 
-| 文件 | 职责 |
-|------|------|
-| `main.rs` | Tauri 入口，注册 5 个 command + 1 个工具函数 |
-| `proxy_builder.rs` | HTTP 代理构建器（支持 socks4/5/http/https） |
-| `utils.rs` | 文件导出工具 |
-| `lib.rs` | 模块声明 |
+| 文件               | 职责                                         |
+| ------------------ | -------------------------------------------- |
+| `main.rs`          | Tauri 入口，注册 5 个 command + 1 个工具函数 |
+| `proxy_builder.rs` | HTTP 代理构建器（支持 socks4/5/http/https）  |
+| `utils.rs`         | 文件导出工具                                 |
+| `lib.rs`           | 模块声明                                     |
 
 **Tauri Commands（Rust → 前端可调用的接口）**:
 
-| Command | 对应 API | 用途 |
-|---------|----------|------|
-| `get_product_info` | `mtop.alibaba.damai.detail.getdetail/1.2` | 获取商品详情 |
-| `get_ticket_list` | `mtop.alibaba.detail.subpage.getdetail/2.0` | 获取票档列表 |
-| `get_ticket_detail` | `mtop.trade.order.build.h5/4.0` | 构建订单（获取订单详情） |
-| `create_order` | `mtop.trade.order.create.h5/4.0` | 创建订单 |
-| `get_user_list` | `mtop.damai.wireless.user.customerlist.get/2.0` | 获取观演人列表 |
+| Command             | 对应 API                                        | 用途                     |
+| ------------------- | ----------------------------------------------- | ------------------------ |
+| `get_product_info`  | `mtop.alibaba.damai.detail.getdetail/1.2`       | 获取商品详情             |
+| `get_ticket_list`   | `mtop.alibaba.detail.subpage.getdetail/2.0`     | 获取票档列表             |
+| `get_ticket_detail` | `mtop.trade.order.build.h5/4.0`                 | 构建订单（获取订单详情） |
+| `create_order`      | `mtop.trade.order.create.h5/4.0`                | 创建订单                 |
+| `get_user_list`     | `mtop.damai.wireless.user.customerlist.get/2.0` | 获取观演人列表           |
 
 ### Vue 前端 (`src/`)
 
-| 文件 | 职责 |
-|------|------|
-| `views/dm.vue` | 大麦抢票主页面，加载 baxia 脚本 |
-| `components/dm/Form.vue` | 配置表单（cookie/itemId/观演人/重试/代理） |
-| `components/dm/Product.vue` | 商品信息展示 + 抢票核心逻辑 |
-| `components/dm/VisitUser.vue` | 观演人管理 |
-| `utils/dm/index.js` | 签名算法、baxia 集成、订单参数构造 |
-| `utils/common/log.js` | 日志工具 |
+| 文件                          | 职责                                       |
+| ----------------------------- | ------------------------------------------ |
+| `views/dm.vue`                | 大麦抢票主页面，加载 baxia 脚本            |
+| `components/dm/Form.vue`      | 配置表单（cookie/itemId/观演人/重试/代理） |
+| `components/dm/Product.vue`   | 商品信息展示 + 抢票核心逻辑                |
+| `components/dm/VisitUser.vue` | 观演人管理                                 |
+| `utils/dm/index.js`           | 签名算法、baxia 集成、订单参数构造         |
+| `utils/common/log.js`         | 日志工具                                   |
 
 ## 主流程
 
 ### 1. 初始化
 
 页面加载时 (`dm.vue::onMounted`):
+
 - 加载阿里 baxia 反爬脚本 (`awsc.js` + `baxiaCommon.js`)
 - 2 秒后初始化 baxia，用于生成后续请求所需的 `bx-ua` 和 `bx-umidtoken`
 
 ### 2. 用户输入
 
 `Form.vue` 收集:
+
 - **cookie**: 从浏览器 F12 手动复制
 - **itemId**: 从商品 URL 自动提取或手动输入
 - **token**: 从 cookie 中的 `_m_h5_tk` 字段自动解析
@@ -94,6 +97,7 @@ Rust GET mtop.alibaba.damai.detail.getdetail/1.2
 ### 4. 获取票档 (`getSkuInfo`)
 
 用户点击场次后触发：
+
 ```
 invoke("get_ticket_list", {itemid, performId, ...})
   → Rust GET mtop.alibaba.detail.subpage.getdetail/2.0
@@ -109,6 +113,7 @@ invoke("get_ticket_list", {itemid, performId, ...})
 **非预售商品**: 点击"购票"按钮 → 直接调用 `buy()`
 
 **预售商品**: 点击"抢票"按钮 → 前端倒计时
+
 - 倒计时基于 `sellStartTime`（服务端返回的开售时间戳）
 - 支持**修正时间**（毫秒级，补偿本地时钟与服务器的偏差）
 - 最终时间 = sellStartTime + timeFix
@@ -130,6 +135,7 @@ Rust POST mtop.trade.order.build.h5/4.0
 ### 7. 创建订单 (`createOrder`)
 
 **参数构造** (`combinationOrderParams()`):
+
 - 从订单详情中提取 data（支付方式、观演人、配送、联系信息等）
 - 注入选中的观演人（设置 `isUsed: true`）
 - 提取 linkage（签名、提交参数）
@@ -146,12 +152,12 @@ Rust POST mtop.trade.order.create.h5/4.0
 
 **结果处理**:
 
-| 响应 | 行为 |
-|------|------|
-| SUCCESS | 播放成功音频，弹窗引导去订单页支付 |
-| "您还有未支付订单" | 停止抢票 |
-| FAIL_SYS_USER_VALIDATE | 滑块/风控触发，停止并提示重新登录 |
-| 其他失败 | 按间隔时间重试，直到用完重试次数 |
+| 响应                   | 行为                               |
+| ---------------------- | ---------------------------------- |
+| SUCCESS                | 播放成功音频，弹窗引导去订单页支付 |
+| "您还有未支付订单"     | 停止抢票                           |
+| FAIL_SYS_USER_VALIDATE | 滑块/风控触发，停止并提示重新登录  |
+| 其他失败               | 按间隔时间重试，直到用完重试次数   |
 
 ## API 签名机制
 
@@ -159,10 +165,10 @@ Rust POST mtop.trade.order.create.h5/4.0
 
 ```javascript
 // 标准阿里 mtop 签名算法
-timestamp = Date.now()
-appKey = "12574478"
-sign = MD5(token + "&" + timestamp + "&" + appKey + "&" + data)
-return [timestamp, sign]
+timestamp = Date.now();
+appKey = "12574478";
+sign = MD5(token + "&" + timestamp + "&" + appKey + "&" + data);
+return [timestamp, sign];
 ```
 
 - `token` 从 Cookie 的 `_m_h5_tk` 字段解析
@@ -174,6 +180,7 @@ return [timestamp, sign]
 ### baxia 凭证
 
 阿里系的反爬系统，通过加载外部脚本生成动态凭证：
+
 - `bx-ua`: 浏览器指纹 token
 - `bx-umidtoken`: 设备标识 token
 - 每组凭证**只能使用两次**
@@ -182,6 +189,7 @@ return [timestamp, sign]
 ### 请求头伪造
 
 Rust 端构造完整的移动端 Chrome 请求头：
+
 - `user-agent`: Android Nexus 5 + Chrome 113
 - `sec-ch-ua-platform`: "Android"
 - `origin` / `referer`: m.damai.cn
@@ -190,17 +198,18 @@ Rust 端构造完整的移动端 Chrome 请求头：
 ### 代理
 
 `ProxyBuilder` 支持：
+
 - 协议: socks4 / socks5 / http / https
 - IP 提取: 正则解析代理地址
 - 每个 Tauri command 都接收 `is_proxy` + `address` 参数
 
 ## 数据持久化
 
-| 数据 | 存储位置 |
-|------|----------|
+| 数据       | 存储位置                       |
+| ---------- | ------------------------------ |
 | 观演人列表 | localStorage (`visitUserList`) |
-| 代理设置 | SQLite (tauri-plugin-sql) |
-| 操作日志 | Log 类（内存） |
+| 代理设置   | SQLite (tauri-plugin-sql)      |
+| 操作日志   | Log 类（内存）                 |
 
 ## 与 UI 自动化方案的关键差异
 

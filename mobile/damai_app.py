@@ -7,23 +7,11 @@ __Created__ = 2025/09/13 19:27
 """
 
 import re
-import os
-import shutil
-import subprocess
-import tempfile
-import threading
 import time
-import xml.etree.ElementTree as ET
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
-from appium import webdriver
-from appium.options.common.base import AppiumOptions
-from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 try:
     from mobile.config import Config
@@ -35,15 +23,10 @@ try:
         DamaiItemResolver,
         DamaiItemResolveError,
         city_keyword,
-        extract_item_id,
         normalize_text,
     )
 except ImportError:
     from item_resolver import (
-        DamaiItemResolver,
-        DamaiItemResolveError,
-        city_keyword,
-        extract_item_id,
         normalize_text,
     )
 
@@ -52,22 +35,69 @@ try:
 except ImportError:
     from logger import get_logger
 
+try:
+    from mobile.ui_primitives import UIPrimitives, ANDROID_UIAUTOMATOR
+except ImportError:
+    from ui_primitives import UIPrimitives, ANDROID_UIAUTOMATOR
+
+try:
+    from mobile.buy_button_guard import BuyButtonGuard
+    from mobile.page_probe import PageProbe
+    from mobile.fast_pipeline import FastPipeline, poll_until, batch_shell_taps
+    from mobile.recovery import RecoveryHelper
+    from mobile.event_navigator import EventNavigator
+    from mobile.price_selector import PriceSelector
+    from mobile.attendee_selector import AttendeeSelector
+except ImportError:
+    from buy_button_guard import BuyButtonGuard
+    from page_probe import PageProbe
+    from fast_pipeline import FastPipeline
+    from recovery import RecoveryHelper
+    from event_navigator import EventNavigator
+    from price_selector import PriceSelector
+    from attendee_selector import AttendeeSelector
+
 logger = get_logger(__name__)
 
-_MAGICK_BIN = shutil.which("magick")
-_TESSERACT_BIN = shutil.which("tesseract")
-_PRICE_UNAVAILABLE_TAGS = {"无票", "缺货", "缺货登记", "售罄", "已售罄", "不可选", "暂不可售"}
+_PRICE_UNAVAILABLE_TAGS = {
+    "无票",
+    "缺货",
+    "缺货登记",
+    "售罄",
+    "已售罄",
+    "不可选",
+    "暂不可售",
+}
 _CTA_READY_KEYWORDS = (
-    "立即购买", "立即抢票", "立即预定", "选座购买", "购买", "抢票", "预定", "提交订单", "去结算", "确定"
+    "立即购买",
+    "立即抢票",
+    "立即预定",
+    "选座购买",
+    "购买",
+    "抢票",
+    "预定",
+    "提交订单",
+    "去结算",
+    "确定",
 )
-_CTA_BLOCKED_KEYWORDS = ("预约", "预售", "即将开抢", "待开售", "未开售", "倒计时", "无票", "售罄", "缺货")
+_CTA_BLOCKED_KEYWORDS = (
+    "预约",
+    "预售",
+    "即将开抢",
+    "待开售",
+    "未开售",
+    "倒计时",
+    "无票",
+    "售罄",
+    "缺货",
+)
 _MANUAL_STEP_BASELINES = {
     "搜索页输入并提交关键词": 6.0,
     "搜索结果扫描并打开目标": 12.0,
 }
 
 
-class DamaiBot:
+class DamaiBot(UIPrimitives):
     def __init__(self, config=None, setup_driver=True):
         self.config = config or Config.load_config()
         self.item_detail = None
@@ -85,6 +115,65 @@ class DamaiBot:
         self._prepare_runtime_config()
         if setup_driver:
             self._setup_driver()
+
+        # Sub-modules that work with any backend (Appium or u2)
+        _device = self.d or self.driver
+        self._attendee_sel = AttendeeSelector(_device, self.config)
+        self._attendee_sel.set_bot(self)
+        self._price_sel = PriceSelector(_device, self.config, probe=None)
+        self._price_sel.set_bot(self)
+        self._navigator = EventNavigator(_device, self.config, probe=None)
+        self._navigator.set_bot(self)
+
+        # Sub-modules for u2-optimized operations
+        if self.d is not None:
+            self._page_probe = PageProbe(self.d, self.config)
+            self._page_probe.set_bot(self)
+            self._guard = BuyButtonGuard(self.d)
+            self._pipeline = FastPipeline(
+                self.d, self.config, self._page_probe, self._guard
+            )
+            self._pipeline.set_bot(self)
+            # Share coordinate cache with pipeline
+            self._pipeline._cached_coords = self._cached_hot_path_coords
+            self._pipeline._cached_no_match = self._cached_hot_path_no_match
+            # Update sub-modules with real probe now that it exists
+            self._navigator._probe = self._page_probe
+            self._recovery = RecoveryHelper(self.d, self._page_probe, self._navigator)
+            self._price_sel._probe = self._page_probe
+
+    def _ensure_pipeline(self):
+        """Lazily create the FastPipeline if not yet initialised (e.g. in tests)."""
+        if hasattr(self, "_pipeline"):
+            return
+        device = self.d or self.driver
+        probe = getattr(self, "_page_probe", None)
+        guard = getattr(self, "_guard", None)
+        self._pipeline = FastPipeline(device, self.config, probe, guard)
+        self._pipeline.set_bot(self)
+        self._pipeline._cached_coords = self._cached_hot_path_coords
+        self._pipeline._cached_no_match = self._cached_hot_path_no_match
+
+    _SOLD_OUT_RE = re.compile(r"缺货|售罄|无票")
+
+    def _is_buy_button_sold_out(self):
+        """Check if the buy button itself shows sold-out text.
+
+        Only inspects the btn_buy_view element, not the whole page, to avoid
+        false positives from other price tiers showing '缺货登记'.
+        """
+        xml_root = self._dump_hierarchy_xml()
+        if xml_root is None:
+            return False
+        for node in xml_root.iter("node"):
+            rid = node.get("resource-id", "")
+            if rid in ("btn_buy_view", "cn.damai:id/btn_buy_view"):
+                text = node.get("text", "")
+                desc = node.get("content-desc", "")
+                if self._SOLD_OUT_RE.search(text) or self._SOLD_OUT_RE.search(desc):
+                    return True
+                return False
+        return False
 
     def _set_terminal_failure(self, reason):
         """Mark the current failure as non-retriable."""
@@ -136,7 +225,9 @@ class DamaiBot:
             "order_pending_payment": "抢票成功：检测到未支付订单，请立即前往支付完成下单",
             "order_flow_completed": "抢票流程完成：已执行提交，等待后续结果确认",
         }
-        logger.info(f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}")
+        logger.info(
+            f"{prefix}{outcome_messages.get(self._last_run_outcome, '本轮执行成功')}"
+        )
 
     @contextmanager
     def _timed_step(self, step_name, manual_baseline_seconds=None):
@@ -147,14 +238,18 @@ class DamaiBot:
         finally:
             elapsed = time.perf_counter() - start
             faster_than_manual = (
-                True if manual_baseline_seconds is None else elapsed <= manual_baseline_seconds
+                True
+                if manual_baseline_seconds is None
+                else elapsed <= manual_baseline_seconds
             )
-            self._last_discovery_step_timings.append({
-                "step": step_name,
-                "seconds": round(elapsed, 3),
-                "manual_baseline_seconds": manual_baseline_seconds,
-                "faster_than_manual": faster_than_manual,
-            })
+            self._last_discovery_step_timings.append(
+                {
+                    "step": step_name,
+                    "seconds": round(elapsed, 3),
+                    "manual_baseline_seconds": manual_baseline_seconds,
+                    "faster_than_manual": faster_than_manual,
+                }
+            )
             if manual_baseline_seconds is None:
                 logger.info(f"步骤耗时[{step_name}] {elapsed:.2f}s")
             else:
@@ -165,163 +260,14 @@ class DamaiBot:
                 )
 
     def _prepare_runtime_config(self):
-        """Resolve item metadata before creating the Appium session."""
-        if self.config.item_url and not self.config.item_id:
-            self.config.item_id = extract_item_id(self.config.item_url)
-
-        if not (self.config.item_url or self.config.item_id):
-            return
-
-        try:
-            self.item_detail = DamaiItemResolver().fetch_item_detail(
-                item_url=self.config.item_url,
-                item_id=self.config.item_id,
-            )
-        except (DamaiItemResolveError, ValueError) as exc:
-            if self.config.keyword:
-                logger.warning(f"解析 item_url/item_id 失败，继续使用现有 keyword: {exc}")
-                return
-            raise
-
-        self.config.item_id = self.item_detail.item_id
-        if not self.config.keyword:
-            self.config.keyword = self.item_detail.search_keyword
-            logger.info(f"已根据 item 链接自动生成搜索关键词: {self.config.keyword}")
-
-        resolved_city = self.item_detail.city_keyword or city_keyword(self.item_detail.venue_city_name)
-        config_city = city_keyword(self.config.city)
-        if resolved_city and config_city and normalize_text(resolved_city) != normalize_text(config_city):
-            raise ValueError(
-                f"配置 city={self.config.city!r} 与 item_url 指向城市={self.item_detail.city_name!r} 不一致"
-            )
-
-        logger.info(
-            f"已解析 itemId={self.item_detail.item_id}，演出={self.item_detail.item_name}，"
-            f"城市={self.item_detail.city_name}，时间={self.item_detail.show_time}，"
-            f"票价范围={self.item_detail.price_range}"
-        )
-
-    def _build_capabilities(self):
-        """根据配置构造 Appium capabilities。"""
-        capabilities = {
-            "platformName": "Android",  # 操作系统
-            "deviceName": self.config.device_name,  # 模拟器或真机名称
-            "appPackage": self.config.app_package,  # app 包名
-            "appActivity": self.config.app_activity,  # app 启动 Activity
-            "unicodeKeyboard": True,  # 支持 Unicode 输入
-            "resetKeyboard": True,  # 隐藏键盘
-            "noReset": True,  # 不重置 app
-            "newCommandTimeout": 6000,  # 超时时间
-            "automationName": "UiAutomator2",  # 使用 uiautomator2
-            "skipServerInstallation": False,  # 跳过服务器安装
-            "ignoreHiddenApiPolicyError": True,  # 忽略隐藏 API 策略错误
-            "disableWindowAnimation": True,  # 禁用窗口动画
-            # 优化性能配置
-            "mjpegServerFramerate": 1,  # 降低截图帧率
-            "shouldTerminateApp": False,
-            "adbExecTimeout": 20000,
-        }
-
-        if self.config.udid:
-            capabilities["udid"] = self.config.udid
-
-        if self.config.platform_version:
-            capabilities["platformVersion"] = self.config.platform_version
-
-        return capabilities
-
-    def _list_connected_device_ids(self):
-        """Return adb-connected Android device ids, or None when adb is unavailable."""
-        try:
-            result = subprocess.run(
-                ["adb", "devices"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            return None
-
-        device_ids = []
-        for line in result.stdout.splitlines():
-            if "\tdevice" not in line:
-                continue
-            device_ids.append(line.split("\t", 1)[0].strip())
-        return device_ids
-
-    def _read_device_android_version(self, udid):
-        """Return the Android version reported by adb for the target device."""
-        try:
-            result = subprocess.run(
-                ["adb", "-s", udid, "shell", "getprop", "ro.build.version.release"],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            return None
-
-        return result.stdout.strip() or None
-
-    def _preflight_validate_device_target(self):
-        """Validate the configured udid/platform version before creating Appium session."""
-        if not self.config.udid:
-            return
-
-        connected_devices = self._list_connected_device_ids()
-        if connected_devices is None:
-            return
-
-        if self.config.udid not in connected_devices:
-            connected_text = "、".join(connected_devices) if connected_devices else "无"
-            raise ValueError(
-                f"当前配置 udid={self.config.udid!r} 不在已连接设备列表中（当前已连接: {connected_text}）。"
-                "请先执行 adb devices，并把 mobile/config.jsonc 中的 udid 改成当前真机序列号。"
-            )
-
-        if not self.config.platform_version:
-            return
-
-        actual_version = self._read_device_android_version(self.config.udid)
-        if actual_version and actual_version != self.config.platform_version:
-            raise ValueError(
-                f"当前配置 platform_version={self.config.platform_version!r} 与设备实际版本 {actual_version!r} 不一致。"
-                "请更新 mobile/config.jsonc 中的 platform_version。"
-            )
+        """Pre-flight config checks before creating the driver session."""
+        pass
 
     def _setup_driver(self):
-        """初始化驱动配置"""
-        if getattr(self.config, "driver_backend", "u2") == "appium":
-            self._setup_appium_driver()
-        else:
-            self._setup_u2_driver()
-
-    def _setup_appium_driver(self):
-        """初始化 Appium 驱动。"""
-        self._preflight_validate_device_target()
-        device_app_info = AppiumOptions()
-        device_app_info.load_capabilities(self._build_capabilities())
-        self.driver = webdriver.Remote(self.config.server_url, options=device_app_info)
-
-        # 更激进的性能优化设置
-        self.driver.update_settings({
-            "waitForIdleTimeout": 0,  # 空闲时间，0 表示不等待，让 UIAutomator2 不等页面“空闲”再返回
-            "actionAcknowledgmentTimeout": 0,  # 禁止等待动作确认
-            "keyInjectionDelay": 0,  # 禁止输入延迟
-            "waitForSelectorTimeout": 100,  # 从300ms减少到100ms，加快WebDriverWait轮询速度
-            "ignoreUnimportantViews": False,  # 保持false避免元素丢失
-            "allowInvisibleElements": True,
-            "enableNotificationListener": False,  # 禁用通知监听
-        })
-
-        # 极短的显式等待，抢票场景下速度优先
-        self.wait = WebDriverWait(self.driver, 2)  # 从5秒减少到2秒
-
-    def _setup_u2_driver(self):
         """初始化 uiautomator2 直连驱动。"""
         import uiautomator2 as u2
 
-        serial = getattr(self.config, "serial", None) or self.config.udid or None
+        serial = getattr(self.config, "serial", None) or None
         self.d = u2.connect(serial)
         try:
             self.d.settings["wait_timeout"] = 0
@@ -332,7 +278,10 @@ class DamaiBot:
         should_start_app = True
         try:
             current_app = self.d.app_current()
-            if isinstance(current_app, dict) and current_app.get("package") == self.config.app_package:
+            if (
+                isinstance(current_app, dict)
+                and current_app.get("package") == self.config.app_package
+            ):
                 should_start_app = False
         except Exception:
             should_start_app = True
@@ -346,388 +295,8 @@ class DamaiBot:
         self.driver = self.d
         self.wait = None
 
-    @staticmethod
-    def _uiautomator_by_values():
-        values = {"android uiautomator", "android_uiautomator"}
-        try:
-            values.add(AppiumBy.ANDROID_UIAUTOMATOR)
-        except Exception:
-            pass
-        return values
-
-    def _using_u2(self):
-        return getattr(self.config, "driver_backend", "u2") == "u2"
-
-    def _find(self, by, value):
-        """统一查找入口，返回 u2 selector 或 Appium element。"""
-        if not self._using_u2():
-            return self.driver.find_element(by, value)
-        return self._appium_selector_to_u2(by, value)
-
-    @staticmethod
-    def _xpath_literal(value):
-        escaped = str(value).replace('"', '\\"')
-        return f'"{escaped}"'
-
-    def _find_all(self, by, value):
-        """统一查找列表，返回 u2 element list 或 Appium element list。"""
-        if not self._using_u2():
-            elements = self.driver.find_elements(by=by, value=value)
-            if isinstance(elements, (list, tuple)):
-                return list(elements)
-            try:
-                return list(elements)
-            except TypeError:
-                return []
-
-        if by in (By.ID, By.CLASS_NAME):
-            key = "resourceId" if by == By.ID else "className"
-            attr = "resource-id" if by == By.ID else "class"
-            if by == By.ID:
-                value = self._qualify_resource_id(value)
-            try:
-                xpath_query = f"//*[@{attr}={self._xpath_literal(value)}]"
-                matches = self.d.xpath(xpath_query).all()
-                if matches:
-                    return list(matches)
-                return []
-            except Exception:
-                # 回退到 instance 扫描，兼容测试桩
-                results = []
-                for index in range(24):
-                    selector = self.d(**{key: value, "instance": index})
-                    if not self._selector_exists(selector):
-                        break
-                    try:
-                        info = getattr(selector, "info", {}) or {}
-                    except Exception:
-                        info = {}
-                    actual = info.get("resourceId" if by == By.ID else "className")
-                    if actual and actual != value:
-                        if index == 0:
-                            return []
-                        break
-                    results.append(selector)
-                return results
-
-        selector = self._appium_selector_to_u2(by, value)
-        if hasattr(selector, "all"):
-            return list(selector.all())
-        try:
-            return list(selector)
-        except TypeError:
-            return [selector] if self._selector_exists(selector) else []
-
-    def _qualify_resource_id(self, value: str) -> str:
-        """补全裸 ID 为完整 resourceId（如 'img_jia' → 'cn.damai:id/img_jia'）。"""
-        if not value or ":id/" in value:
-            return value
-        pkg = getattr(self.config, "app_package", "cn.damai")
-        return f"{pkg}:id/{value}"
-
-    def _appium_selector_to_u2(self, by, value):
-        if by == By.ID:
-            return self.d(resourceId=self._qualify_resource_id(value))
-        if by == By.CLASS_NAME:
-            return self.d(className=value)
-        if by == By.XPATH:
-            return self.d.xpath(value)
-        if by in self._uiautomator_by_values():
-            return self._parse_uiselector(value)
-        raise ValueError(f"不支持的 by 类型: {by}")
-
-    def _parse_uiselector(self, uiselector_str):
-        """将常见 UiSelector 表达式转换为 u2 selector。"""
-        kwargs = {}
-        for pattern, key in [
-            (r'\.text\("([^"]+)"\)', "text"),
-            (r'\.textContains\("([^"]+)"\)', "textContains"),
-            (r'\.textMatches\("([^"]+)"\)', "textMatches"),
-            (r'\.className\("([^"]+)"\)', "className"),
-        ]:
-            match = re.search(pattern, uiselector_str)
-            if match:
-                kwargs[key] = match.group(1)
-
-        match = re.search(r"\.clickable\((true|false)\)", uiselector_str)
-        if match:
-            kwargs["clickable"] = match.group(1) == "true"
-
-        # Appium UiSelector 既出现过 instance(N) 也出现过 index(N)。
-        match = re.search(r"\.(instance|index)\((\d+)\)", uiselector_str)
-        if match:
-            kwargs["instance"] = int(match.group(2))
-
-        if not kwargs:
-            raise ValueError(f"无法解析 UiSelector: {uiselector_str!r}")
-        return self.d(**kwargs)
-
-    @staticmethod
-    def _selector_exists(selector):
-        exists = getattr(selector, "exists", None)
-        if callable(exists):
-            try:
-                return bool(exists(timeout=0))
-            except TypeError:
-                return bool(exists())
-            except Exception:
-                return False
-        if isinstance(exists, bool):
-            return exists
-        if hasattr(selector, "wait"):
-            try:
-                return bool(selector.wait(timeout=0))
-            except Exception:
-                return False
-        return False
-
-    def _wait_for_element(self, by, value, timeout=1.5):
-        """等待元素出现并返回元素对象。"""
-        if not self._using_u2():
-            return WebDriverWait(self.driver, timeout).until(
-                EC.presence_of_element_located((by, value))
-            )
-
-        selector = self._find(by, value)
-        if hasattr(selector, "wait") and selector.wait(timeout=timeout):
-            if hasattr(selector, "get"):
-                try:
-                    return selector.get()
-                except Exception:
-                    pass
-            return selector
-        raise TimeoutException(f"timeout waiting element: by={by}, value={value}")
-
-    def _element_rect(self, element):
-        """返回统一 rect 结构：{'x','y','width','height'}。"""
-        if hasattr(element, "rect"):
-            rect = element.rect
-            if isinstance(rect, dict):
-                return rect
-            if isinstance(rect, (list, tuple)) and len(rect) == 4:
-                x, y, width, height = [int(v) for v in rect]
-                return {
-                    "x": x,
-                    "y": y,
-                    "width": max(0, width),
-                    "height": max(0, height),
-                }
-
-        try:
-            bounds_tuple = getattr(element, "bounds", None)
-            if isinstance(bounds_tuple, (list, tuple)) and len(bounds_tuple) == 4:
-                left, top, right, bottom = [int(v) for v in bounds_tuple]
-                return {
-                    "x": left,
-                    "y": top,
-                    "width": max(0, right - left),
-                    "height": max(0, bottom - top),
-                }
-        except Exception:
-            pass
-
-        bounds = element.info.get("bounds") or {}
-        left = int(bounds.get("left", 0))
-        top = int(bounds.get("top", 0))
-        right = int(bounds.get("right", left))
-        bottom = int(bounds.get("bottom", top))
-        return {
-            "x": left,
-            "y": top,
-            "width": max(0, right - left),
-            "height": max(0, bottom - top),
-        }
-
-    @staticmethod
-    def _is_clickable(element):
-        if hasattr(element, "get_attribute"):
-            try:
-                return str(element.get_attribute("clickable")).lower() == "true"
-            except Exception:
-                return False
-        try:
-            return bool(element.info.get("clickable", False))
-        except Exception:
-            return False
-
-    @staticmethod
-    def _is_checked(element):
-        if hasattr(element, "get_attribute"):
-            try:
-                return str(element.get_attribute("checked")).lower() == "true"
-            except Exception:
-                return False
-        try:
-            return bool(element.info.get("checked", False))
-        except Exception:
-            return False
-
-    def _container_find_elements(self, container, by, value):
-        """容器内元素查找，兼容 Appium element 与 u2 selector。"""
-        if container is self.driver:
-            return self._find_all(by, value)
-
-        if not self._using_u2():
-            elements = container.find_elements(by=by, value=value)
-            if isinstance(elements, (list, tuple)):
-                return list(elements)
-            try:
-                return list(elements)
-            except TypeError:
-                return []
-
-        if by == By.ID:
-            container_elem = getattr(container, "elem", None)
-            if container_elem is not None and hasattr(container_elem, "iter"):
-                try:
-                    return [node for node in container_elem.iter() if node.get("resource-id") == value]
-                except Exception:
-                    pass
-            results = []
-            for index in range(24):
-                child = container.child(resourceId=value, instance=index)
-                if not self._selector_exists(child):
-                    break
-                try:
-                    info = getattr(child, "info", {}) or {}
-                except Exception:
-                    info = {}
-                actual = info.get("resourceId")
-                if actual and actual != value:
-                    if index == 0:
-                        return []
-                    break
-                results.append(child)
-            return results
-        if by == By.CLASS_NAME:
-            container_elem = getattr(container, "elem", None)
-            if container_elem is not None and hasattr(container_elem, "iter"):
-                try:
-                    return [node for node in container_elem.iter() if node.get("class") == value]
-                except Exception:
-                    pass
-            results = []
-            for index in range(24):
-                child = container.child(className=value, instance=index)
-                if not self._selector_exists(child):
-                    break
-                try:
-                    info = getattr(child, "info", {}) or {}
-                except Exception:
-                    info = {}
-                actual = info.get("className")
-                if actual and actual != value:
-                    if index == 0:
-                        return []
-                    break
-                results.append(child)
-            return results
-        if by == By.XPATH and value == ".//*":
-            return self._collect_descendant_texts(container, return_text=False)
-        return []
-
-    def ultra_fast_click(self, by, value, timeout=1.5):
-        """超快速点击 - 适合抢票场景"""
-        try:
-            el = self._wait_for_element(by, value, timeout=timeout)
-            self._click_element_center(el, duration=50)
-            return True
-        except TimeoutException:
-            return False
-
-    def _cached_tap(self, cache_key, by, value, timeout=0.5):
-        """在 u2 模式下，首次查找元素并缓存坐标，热路径重试直接手势点击（单次 HTTP 调用）。
-
-        冷路径（cache miss）: selector.wait + selector.info + _click_coordinates = 3 次 HTTP 调用。
-        热路径（cache hit）:  _click_coordinates = 1 次 HTTP 调用，跳过所有元素查找。
-        Returns True if tapped, False if element not found within timeout.
-        """
-        cached = self._cached_hot_path_coords.get(cache_key)
-        if cached:
-            self._click_coordinates(*cached)
-            return True
-        if not self._using_u2():
-            return self.ultra_fast_click(by, value, timeout=timeout)
-        try:
-            selector = self._appium_selector_to_u2(by, value)
-            if not selector.wait(timeout=timeout):
-                return False
-            info = selector.info
-            bounds = info.get("bounds") if isinstance(info, dict) else {}
-            if isinstance(bounds, dict) and "left" in bounds:
-                x = (int(bounds["left"]) + int(bounds["right"])) // 2
-                y = (int(bounds["top"]) + int(bounds["bottom"])) // 2
-                self._cached_hot_path_coords[cache_key] = (x, y)
-                self._click_coordinates(x, y)
-                return True
-            # Fallback: couldn't extract bounds — click via element center (no caching).
-            el = selector.get()
-            self._click_element_center(el, duration=50)
-            return True
-        except Exception:
-            return False
-
-    def batch_click(self, elements_info, delay=0.1):
-        """批量点击操作"""
-        for by, value in elements_info:
-            if self.ultra_fast_click(by, value):
-                if delay > 0:
-                    time.sleep(delay)
-            else:
-                logger.warning(f"点击失败: {value}")
-
-    def ultra_batch_click(self, elements_info, timeout=2):
-        """超快批量点击 - 带等待机制"""
-        coordinates = []
-        # 批量收集坐标，带超时等待
-        for by, value in elements_info:
-            try:
-                el = self._wait_for_element(by, value, timeout=timeout)
-                rect = self._element_rect(el)
-                x = rect['x'] + rect['width'] // 2
-                y = rect['y'] + rect['height'] // 2
-                coordinates.append((x, y, value))
-            except TimeoutException:
-                logger.warning(f"超时未找到用户: {value}")
-            except Exception as e:
-                logger.error(f"查找用户失败 {value}: {e}")
-        logger.info(f"成功找到 {len(coordinates)} 个用户")
-        # 快速连续点击
-        for i, (x, y, value) in enumerate(coordinates):
-            self._click_coordinates(x, y, duration=30)
-            if i < len(coordinates) - 1:
-                time.sleep(0.01)
-            logger.debug(f"点击用户: {value}")
-        return len(coordinates)
-
-    def smart_wait_and_click(self, by, value, backup_selectors=None, timeout=1.5):
-        """智能等待和点击 - 支持备用选择器"""
-        selectors = [(by, value)]
-        if backup_selectors:
-            selectors.extend(backup_selectors)
-
-        for selector_by, selector_value in selectors:
-            try:
-                el = self._wait_for_element(selector_by, selector_value, timeout=timeout)
-                self._click_element_center(el, duration=50)
-                return True
-            except TimeoutException:
-                continue
-        return False
-
-    def smart_wait_for_element(self, by, value, backup_selectors=None, timeout=1.5):
-        """智能等待元素出现 - 支持备用选择器，但不执行点击。"""
-        selectors = [(by, value)]
-        if backup_selectors:
-            selectors.extend(backup_selectors)
-
-        for selector_by, selector_value in selectors:
-            try:
-                self._wait_for_element(selector_by, selector_value, timeout=timeout)
-                return True
-            except TimeoutException:
-                continue
-        return False
+    # Core element operations, click operations, element inspection, and selector
+    # utilities are inherited from UIPrimitives (mobile/ui_primitives.py).
 
     def wait_for_page_state(self, expected_states, timeout=5, poll_interval=0.2):
         """轮询等待页面进入指定状态，返回最后一次探测结果。"""
@@ -735,21 +304,16 @@ class DamaiBot:
         last_probe = None
 
         while time.time() < deadline:
-            last_probe = self.probe_current_page()
+            last_probe = self.probe_current_page(fast=True)
             if last_probe["state"] in expected_states:
                 return last_probe
             time.sleep(poll_interval)
 
         return last_probe if last_probe is not None else self.probe_current_page()
 
-    def _has_any_element(self, selectors):
-        """Return True if any selector matches immediately."""
-        for by, value in selectors:
-            if self._has_element(by, value):
-                return True
-        return False
-
-    def _wait_for_purchase_entry_result(self, timeout=1.2, poll_interval=0.04):
+    def _wait_for_purchase_entry_result(
+        self, timeout=1.2, poll_interval=0.04, fallback_probe_on_timeout=True
+    ):
         """Wait for the detail-page CTA to open either sku or confirm page."""
         if self.config.rush_mode:
             # 极速模式：每次轮询只用 1 个 ID 选择器（~60ms/轮），替代 4 个选择器（~240ms/轮）。
@@ -761,16 +325,20 @@ class DamaiBot:
                     return {
                         "state": "sku_page",
                         "price_container": True,
-                        "reservation_mode": False if skip_reservation_check else self.is_reservation_sku_mode(),
+                        "reservation_mode": False
+                        if skip_reservation_check
+                        else self.is_reservation_sku_mode(),
                     }
                 if self._has_element(By.ID, "cn.damai:id/checkbox"):
                     return {"state": "order_confirm_page", "submit_button": True}
                 time.sleep(poll_interval)
-            return self.probe_current_page()
+            if fallback_probe_on_timeout:
+                return self.probe_current_page()
+            return None
 
         submit_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
             (By.XPATH, '//*[contains(@text,"提交")]'),
         ]
         sku_selectors = [
@@ -793,7 +361,9 @@ class DamaiBot:
                 }
             time.sleep(poll_interval)
 
-        return self.probe_current_page()
+        if fallback_probe_on_timeout:
+            return self.probe_current_page()
+        return None
 
     def _wait_for_submit_ready(self, timeout=1.6, poll_interval=0.04):
         """Wait until the confirm-page submit button appears."""
@@ -807,8 +377,8 @@ class DamaiBot:
             return False
 
         submit_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
             (By.XPATH, '//*[contains(@text,"提交")]'),
         ]
 
@@ -820,858 +390,147 @@ class DamaiBot:
 
         return False
 
+    def _click_sku_buy_button_element(self, burst_count=1):
+        """Fallback to an element click for Damai's custom SKU buy button."""
+        try:
+            buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
+        except Exception:
+            return False
+
+        click_action = getattr(buy_button, "click", None)
+        if not callable(click_action):
+            return False
+
+        for attempt in range(max(1, int(burst_count))):
+            try:
+                click_action()
+            except Exception:
+                if attempt == 0:
+                    return False
+            if attempt < burst_count - 1:
+                time.sleep(0.03)
+        return True
+
     def _attendee_required_count_on_confirm_page(self):
-        """Infer how many attendees must be selected on the confirm page."""
-        hint_text = self._safe_element_text(
-            self.driver,
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("仅需选择")',
-        )
-        match = re.search(r"仅需选择\s*(\d+)\s*位", hint_text or "")
-        if match:
-            return max(1, int(match.group(1)))
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._attendee_required_count_on_confirm_page()
+        logger.warning("AttendeeSelector 未初始化")
         return max(1, len(self.config.users or []))
 
     def _attendee_checkbox_elements(self):
-        try:
-            return self._find_all(By.ID, "cn.damai:id/checkbox")
-        except Exception:
-            return []
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._attendee_checkbox_elements()
+        return []
 
     @staticmethod
     def _is_checkbox_selected(checkbox):
         return DamaiBot._is_checked(checkbox)
 
-    def _attendee_selected_count(self, checkbox_elements=None, use_source_fallback=True):
-        """Count selected attendee checkboxes, with XML fallback for flaky checked attrs."""
-        elements = checkbox_elements if checkbox_elements is not None else self._attendee_checkbox_elements()
-        selected_count = sum(1 for checkbox in elements if self._is_checkbox_selected(checkbox))
-        if selected_count > 0:
-            return selected_count
-        if (self.config.rush_mode and not self.config.if_commit_order) and not use_source_fallback:
-            # 开发验证极速模式下避免 page_source 级别扫描带来的高延迟。
-            return selected_count
-
-        try:
-            if not self._using_u2():
-                source = self.driver.page_source or ""
-            else:
-                source = self.d.dump_hierarchy() or ""
-        except Exception:
-            return selected_count
-        if not isinstance(source, str):
-            return selected_count
-
-        states = re.findall(
-            r'resource-id="cn\.damai:id/checkbox"[^>]*checked="(true|false)"',
-            source,
-        )
-        if not states:
-            return selected_count
-        return sum(1 for state in states if state == "true")
+    def _attendee_selected_count(
+        self, checkbox_elements=None, use_source_fallback=True
+    ):
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._attendee_selected_count(
+                checkbox_elements, use_source_fallback
+            )
+        return 0
 
     def _click_attendee_checkbox(self, checkbox):
-        """Try multiple click paths and verify checkbox becomes selected."""
-        use_fallback = not (self.config.rush_mode and not self.config.if_commit_order)
-        before_selected = self._attendee_selected_count(use_source_fallback=use_fallback)
-        click_actions = [
-            lambda: self._click_element_center(checkbox, duration=35),
-            lambda: checkbox.click(),
-            lambda: self._burst_click_element_center(checkbox, count=2, interval_ms=30, duration=30),
-        ]
-
-        for action in click_actions:
-            try:
-                action()
-            except Exception:
-                continue
-            time.sleep(0.05)
-            if self._is_checkbox_selected(checkbox):
-                return True
-            if self._attendee_selected_count(use_source_fallback=use_fallback) > before_selected:
-                return True
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._click_attendee_checkbox(checkbox)
         return False
 
     def _click_attendee_checkbox_fast(self, checkbox):
-        """Low-latency checkbox click path for rush-mode validation."""
-        click_actions = [
-            lambda: checkbox.click(),
-            lambda: self._click_element_center(checkbox, duration=28),
-        ]
-        for action in click_actions:
-            try:
-                action()
-                time.sleep(0.01)
-                return True
-            except Exception:
-                continue
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._click_attendee_checkbox_fast(checkbox)
         return False
 
     def _select_attendee_checkbox_by_name(self, user_name):
-        checkbox_xpaths = [
-            (
-                f'//*[@resource-id="cn.damai:id/text_name" and normalize-space(@text)="{user_name}"]'
-                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
-                '//*[@resource-id="cn.damai:id/checkbox"]'
-            ),
-            (
-                f'//*[@resource-id="cn.damai:id/text_name" and contains(normalize-space(@text), "{user_name}")]'
-                '/ancestor::*[.//*[@resource-id="cn.damai:id/checkbox"]][1]'
-                '//*[@resource-id="cn.damai:id/checkbox"]'
-            ),
-        ]
-
-        for checkbox_xpath in checkbox_xpaths:
-            try:
-                checkboxes = self._find_all(By.XPATH, checkbox_xpath)
-            except Exception:
-                checkboxes = []
-
-            for checkbox in checkboxes:
-                if self._is_checkbox_selected(checkbox):
-                    return True
-                if self._click_attendee_checkbox(checkbox):
-                    return True
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._select_attendee_checkbox_by_name(user_name)
         return False
 
-    def _ensure_attendees_selected_on_confirm_page(self, require_attendee_section=False):
-        """Make sure required attendee checkboxes are selected before submit."""
-        required_count = max(1, len(self.config.users or []))
-
-        if self.config.rush_mode and not self.config.if_commit_order:
-            # 验证模式极速路径：
-            # 确认页每次都是新加载的，观演人初始状态均为未勾选。
-            # 热重试时用缓存坐标直接点击，完全跳过 XPath dump（省 ~0.1-0.2s）。
-            cached_coords = self._cached_hot_path_coords.get("attendee_checkboxes")
-            if cached_coords:
-                logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
-                logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-                for coords in cached_coords[:required_count]:
-                    self._click_coordinates(*coords)
-                return True
-
-            # 冷路径：XPath dump 获取 checkbox，顺便提取坐标并缓存。
-            checkbox_elements = self._attendee_checkbox_elements()
-            if not checkbox_elements:
-                return not require_attendee_section
-
-            # 从 XPathElement 的已缓存 XML 数据中提取坐标（无额外 HTTP 调用）。
-            _coords = []
-            for el in checkbox_elements:
-                try:
-                    bt = getattr(el, "bounds", None)
-                    if isinstance(bt, (list, tuple)) and len(bt) == 4:
-                        left, top, right, bottom = [int(v) for v in bt]
-                        _coords.append(((left + right) // 2, (top + bottom) // 2))
-                except Exception:
-                    pass
-            if _coords:
-                self._cached_hot_path_coords["attendee_checkboxes"] = _coords
-
-            selected_count = self._attendee_selected_count(checkbox_elements, use_source_fallback=False)
-            if selected_count >= required_count:
-                return True
-
-            logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
-            logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-            clicked_count = 0
-            for checkbox in checkbox_elements[:required_count]:
-                if self._click_attendee_checkbox_fast(checkbox):
-                    clicked_count += 1
-            if clicked_count < required_count:
-                logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {clicked_count} 位）")
-                return False
-            return True
-
-        checkbox_elements = self._attendee_checkbox_elements()
-
-        if self.config.rush_mode:
-            # 极速模式（实际提交）：checkbox 存在即说明观演人区域可见，跳过额外的 UiSelector 文本查找。
-            # required_count 直接取 config.users 长度，避免再发一次 UiSelector 查询（~100ms）。
-            if not checkbox_elements:
-                return not require_attendee_section
-        else:
-            attendee_section_visible = self._has_element(
-                AppiumBy.ANDROID_UIAUTOMATOR,
-                'new UiSelector().textContains("实名观演人")',
+    def _ensure_attendees_selected_on_confirm_page(
+        self, require_attendee_section=False
+    ):
+        if hasattr(self, "_attendee_sel"):
+            return self._attendee_sel._ensure_attendees_selected_on_confirm_page(
+                require_attendee_section
             )
-            if not attendee_section_visible:
-                return not require_attendee_section
-            if not checkbox_elements:
-                logger.warning("确认页存在观演人区域，但未找到可勾选观演人，请手动检查")
-                return False
-            required_count = self._attendee_required_count_on_confirm_page()
-
-        # rush_mode 下跳过 page_source 全页 XML dump（~300-500ms），直接用 get_attribute 结果。
-        selected_count = self._attendee_selected_count(
-            checkbox_elements,
-            use_source_fallback=not self.config.rush_mode,
-        )
-        if selected_count >= required_count:
-            return True
-
-        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 {selected_count}/{required_count}）")
-
-        unmatched_users = []
-        for user_name in self.config.users or []:
-            if selected_count >= required_count:
-                break
-            if self._select_attendee_checkbox_by_name(user_name):
-                selected_count = self._attendee_selected_count()
-            else:
-                unmatched_users.append(user_name)
-
-        if unmatched_users and selected_count < required_count:
-            logger.warning(f"未能按姓名定位观演人: {'、'.join(unmatched_users)}，将尝试按勾选框兜底")
-
-        if selected_count < required_count:
-            for checkbox in self._attendee_checkbox_elements():
-                if selected_count >= required_count:
-                    break
-                if self._is_checkbox_selected(checkbox):
-                    continue
-                if not self._click_attendee_checkbox(checkbox):
-                    continue
-                selected_count = self._attendee_selected_count()
-
-        if selected_count < required_count:
-            logger.warning(f"观演人选择不足（需要 {required_count} 位，当前 {selected_count} 位）")
-            return False
-        return True
-
-    def _has_element(self, by, value):
-        """快速判断元素是否存在，不等待点击状态。"""
-        try:
-            if not self._using_u2():
-                return len(self.driver.find_elements(by=by, value=value)) > 0
-            return self._selector_exists(self._find(by, value))
-        except Exception:
-            return False
-
-    def _get_current_activity(self):
-        """获取当前 Activity，失败时返回空字符串。"""
-        try:
-            if not self._using_u2():
-                return self.driver.current_activity or ""
-            return (self.d.app_current() or {}).get("activity", "") or ""
-        except Exception:
-            return ""
-
-    def _click_element_center(self, element, duration=50):
-        """Click the center point of an element via gesture."""
-        rect = self._element_rect(element)
-        if rect["width"] > 0 and rect["height"] > 0:
-            x = rect["x"] + rect["width"] // 2
-            y = rect["y"] + rect["height"] // 2
-            self._click_coordinates(x, y, duration=duration)
-            return
-
-        if hasattr(element, "click"):
-            element.click()
-            return
-
-        raise RuntimeError("无法定位元素中心点用于点击")
-
-    def _click_coordinates(self, x, y, duration=50):
-        """Click a fixed screen coordinate via gesture."""
-        x = int(x)
-        y = int(y)
-        if not self._using_u2():
-            self.driver.execute_script(
-                "mobile: clickGesture",
-                {"x": x, "y": y, "duration": duration},
-            )
-            return
-
-        if duration <= 50:
-            self.d.click(x, y)
-        else:
-            self.d.long_click(x, y, max(duration / 1000, 0.05))
-
-    def _press_keycode_safe(self, keycode, context=""):
-        """Press an Android keycode with error handling to avoid hard crashes."""
-        try:
-            if not self._using_u2():
-                self.driver.press_keycode(keycode)
-            else:
-                u2_key = {4: "back", 66: "enter"}.get(keycode, keycode)
-                self.d.press(u2_key)
-            return True
-        except Exception as exc:
-            suffix = f"（{context}）" if context else ""
-            logger.warning(f"按键事件失败{suffix}: keycode={keycode}, err={exc}")
-            return False
-
-    def _burst_click_element_center(self, element, count=2, interval_ms=35, duration=30):
-        """Click an element center repeatedly for low-latency race-mode actions."""
-        for attempt in range(count):
-            self._click_element_center(element, duration=duration)
-            if attempt < count - 1 and interval_ms > 0:
-                time.sleep(interval_ms / 1000)
-
-    def _burst_click_coordinates(self, x, y, count=2, interval_ms=35, duration=30):
-        """Click a fixed coordinate repeatedly."""
-        for attempt in range(count):
-            self._click_coordinates(x, y, duration=duration)
-            if attempt < count - 1 and interval_ms > 0:
-                time.sleep(interval_ms / 1000)
+        logger.warning("AttendeeSelector 未初始化")
+        return False
 
     def _get_buy_button_coordinates(self, xml_root=None):
-        """Capture the current buy/confirm button coordinates before the hot path needs them."""
-        if self._using_u2():
-            if xml_root is None:
-                xml_root = self._dump_hierarchy_xml()
-            if xml_root is not None:
-                for node in xml_root.iter("node"):
-                    rid = node.get("resource-id", "")
-                    if rid in ("btn_buy_view", "cn.damai:id/btn_buy_view"):
-                        bounds = self._parse_bounds(node.get("bounds", ""))
-                        if bounds:
-                            left, top, right, bottom = bounds
-                            return ((left + right) // 2, (top + bottom) // 2)
-                return None
-
-        selectors = [
-            (By.ID, "cn.damai:id/btn_buy_view"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")'),
-        ]
-        for by, value in selectors:
-            try:
-                elements = self._find_all(by, value)
-            except Exception:
-                continue
-            if not elements:
-                continue
-            rect = self._element_rect(elements[0])
-            return (
-                rect["x"] + rect["width"] // 2,
-                rect["y"] + rect["height"] // 2,
-            )
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._get_buy_button_coordinates(xml_root)
         return None
 
     def _get_price_option_coordinates_by_config_index(self, xml_root=None):
-        """Capture the configured price card center so rush mode can tap by coordinate."""
-        if self._using_u2():
-            if xml_root is None:
-                xml_root = self._dump_hierarchy_xml()
-            if xml_root is not None:
-                for node in xml_root.iter("node"):
-                    if node.get("resource-id") == "cn.damai:id/project_detail_perform_price_flowlayout":
-                        cards = [
-                            child for child in node
-                            if child.get("class") == "android.widget.FrameLayout"
-                            and child.get("clickable") == "true"
-                        ]
-                        if not (0 <= self.config.price_index < len(cards)):
-                            return None
-                        bounds = self._parse_bounds(cards[self.config.price_index].get("bounds", ""))
-                        if bounds:
-                            left, top, right, bottom = bounds
-                            return ((left + right) // 2, (top + bottom) // 2)
-                        return None
-                return None
-
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-        except Exception:
-            return None
-
-        try:
-            cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            return None
-        clickable_cards = [card for card in cards if self._is_clickable(card)]
-        if not (0 <= self.config.price_index < len(clickable_cards)):
-            return None
-
-        rect = self._element_rect(clickable_cards[self.config.price_index])
-        return (
-            rect["x"] + rect["width"] // 2,
-            rect["y"] + rect["height"] // 2,
-        )
-
-    def _safe_element_text(self, container, by, value):
-        """Read the first child text if present."""
-        try:
-            elements = self._container_find_elements(container, by, value)
-        except Exception:
-            return ""
-
-        for element in elements:
-            text = self._normalize_element_text(self._read_element_text(element))
-            if text:
-                return text
-        return ""
-
-    def _safe_element_texts(self, container, by, value):
-        """Read all non-empty child texts if present."""
-        try:
-            elements = self._container_find_elements(container, by, value)
-        except Exception:
-            return []
-
-        texts = []
-        seen = set()
-        for element in elements:
-            text = self._normalize_element_text(self._read_element_text(element))
-            if not text or text in seen:
-                continue
-            texts.append(text)
-            seen.add(text)
-        return texts
-
-    @staticmethod
-    def _parse_bounds(bounds_text):
-        match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_text or "")
-        if not match:
-            return None
-        left, top, right, bottom = map(int, match.groups())
-        return left, top, right, bottom
-
-    @staticmethod
-    def _bounds_inside(inner, outer):
-        return (
-            inner[0] >= outer[0]
-            and inner[1] >= outer[1]
-            and inner[2] <= outer[2]
-            and inner[3] <= outer[3]
-        )
-
-    def _collect_descendant_texts(self, container, return_text=True, xml_root=None):
-        """Collect all visible descendant texts under a container.
-
-        xml_root: pre-parsed ET root to avoid a redundant dump_hierarchy() call.
-        """
-        if not self._using_u2():
-            descendants = []
-            try:
-                descendants = container.find_elements(By.XPATH, ".//*")
-            except Exception:
-                descendants = []
-
-            if not return_text:
-                return descendants
-
-            texts = []
-            seen = set()
-            for element in descendants:
-                try:
-                    text = self._normalize_element_text(self._read_element_text(element))
-                except Exception:
-                    text = ""
-                if not text or text in seen:
-                    continue
-                texts.append(text)
-                seen.add(text)
-            return texts
-
-        # u2: parse hierarchy XML and keep only nodes inside container bounds.
-        texts = []
-        seen = set()
-        nodes = []
-        try:
-            container_bounds = container.info.get("bounds")
-            if not container_bounds:
-                return [] if return_text else []
-            outer = (
-                int(container_bounds.get("left", 0)),
-                int(container_bounds.get("top", 0)),
-                int(container_bounds.get("right", 0)),
-                int(container_bounds.get("bottom", 0)),
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._get_price_option_coordinates_by_config_index(
+                xml_root
             )
-            root = xml_root if xml_root is not None else ET.fromstring(self.d.dump_hierarchy())
-            for node in root.iter("node"):
-                parsed = self._parse_bounds(node.get("bounds", ""))
-                if parsed is None or not self._bounds_inside(parsed, outer):
-                    continue
-                nodes.append(node)
-        except Exception:
-            return [] if return_text else []
-
-        if not return_text:
-            return nodes
-
-        for node in nodes:
-            text = self._normalize_element_text(node.get("text", ""))
-            if not text or text in seen:
-                continue
-            texts.append(text)
-            seen.add(text)
-        return texts
-
-    @staticmethod
-    def _normalize_element_text(value):
-        """Normalize UI text values; ignore non-string placeholders from mocked elements."""
-        if isinstance(value, str):
-            return value.strip()
-        return ""
-
-    def _read_element_text(self, element):
-        """Read element text across Appium and u2 element types."""
-        try:
-            value = getattr(element, "text", "")
-            if isinstance(value, str) and value.strip():
-                return value
-        except Exception:
-            pass
-
-        try:
-            if hasattr(element, "get_text"):
-                value = element.get_text()
-                if isinstance(value, str) and value.strip():
-                    return value
-        except Exception:
-            pass
-
-        try:
-            info = getattr(element, "info", {})
-            if isinstance(info, dict):
-                value = info.get("text", "")
-                if isinstance(value, str) and value.strip():
-                    return value
-        except Exception:
-            pass
-
-        try:
-            attrib = getattr(element, "attrib", {})
-            if attrib is not None and hasattr(attrib, "get"):
-                value = attrib.get("text", "")
-                if isinstance(value, str) and value.strip():
-                    return value
-        except Exception:
-            pass
-
-        return ""
+        return None
 
     def _build_compound_price_text(self, container):
-        """Build a human-readable price string from split price fields."""
-        prefix_ids = (
-            "cn.damai:id/bricks_dm_common_price_prefix",
-            "cn.damai:id/project_price_char",
-        )
-        value_ids = (
-            "cn.damai:id/bricks_dm_common_price_des",
-            "cn.damai:id/project_price_pre",
-            "cn.damai:id/project_price_suffix",
-        )
-        suffix_ids = (
-            "cn.damai:id/bricks_dm_common_price_suffix",
-        )
-
-        prefix = ""
-        value_parts = []
-        suffix = ""
-
-        for resource_id in prefix_ids:
-            prefix = prefix or self._safe_element_text(container, By.ID, resource_id)
-        for resource_id in value_ids:
-            value_parts.extend(self._safe_element_texts(container, By.ID, resource_id))
-        for resource_id in suffix_ids:
-            suffix = suffix or self._safe_element_text(container, By.ID, resource_id)
-
-        value = "".join(value_parts).strip()
-        compound = f"{prefix}{value}{suffix}".strip()
-        if compound == "¥":
-            compound = ""
-        if compound and prefix == "¥" and suffix == "起":
-            return compound
-        if value and value.replace(".", "", 1).isdigit() and not suffix:
-            return f"{value}元"
-        if compound and compound.startswith("¥"):
-            return compound.replace("¥", "¥", 1)
-        return compound
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._build_compound_price_text(container)
+        return ""
 
     def _price_option_text_from_descendants(self, texts):
-        """Collapse descendant texts into a price label."""
-        if not texts:
-            return ""
-
-        filtered = []
-        ignored = {"可预约", "预售", "无票", "已预约", "缺货", "惠", "荐", "热", "售罄"}
-        for text in texts:
-            value = text.strip()
-            if not value or value in ignored:
-                continue
-            filtered.append(value)
-
-        if not filtered:
-            return ""
-
-        merged = "".join(filtered)
-        if merged.isdigit():
-            return f"{merged}元"
-        if re.fullmatch(r"[\u4e00-\u9fffA-Za-z]+[0-9]{2,5}", merged):
-            return f"{merged}元"
-        if re.fullmatch(r"[0-9]{2,5}[A-Za-z\u4e00-\u9fff]+", merged):
-            return merged
-        return merged
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._price_option_text_from_descendants(texts)
+        return ""
 
     def _normalize_ocr_price_text(self, ocr_output):
-        """Extract the leading ticket price from noisy OCR output."""
-        normalized_text = ocr_output if isinstance(ocr_output, str) else ""
-        digits = "".join(re.findall(r"\d", normalized_text))
-        if len(digits) >= 4:
-            leading_four = int(digits[:4])
-            if 1000 <= leading_four <= 1999:
-                return f"{leading_four}元"
-        if len(digits) >= 3:
-            leading_three = int(digits[:3])
-            if 100 <= leading_three <= 999:
-                return f"{leading_three}元"
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._normalize_ocr_price_text(ocr_output)
         return ""
 
     def _ocr_price_text_from_card(self, screenshot_path, rect):
-        """OCR the price number from a price-card crop as a last-resort fallback."""
-        if not (_MAGICK_BIN and _TESSERACT_BIN and screenshot_path and rect):
-            return ""
-
-        crop_path = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                crop_path = tmp_file.name
-
-            subprocess.run(
-                [
-                    _MAGICK_BIN,
-                    screenshot_path,
-                    "-crop", f"{rect['width']}x{rect['height']}+{rect['x']}+{rect['y']}",
-                    "-resize", "300%",
-                    crop_path,
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            result = subprocess.run(
-                [_TESSERACT_BIN, crop_path, "stdout", "-l", "eng+snum", "--psm", "6"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            return self._normalize_ocr_price_text(result.stdout)
-        except Exception:
-            return ""
-        finally:
-            if crop_path and os.path.exists(crop_path):
-                try:
-                    os.unlink(crop_path)
-                except OSError:
-                    pass
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._ocr_price_text_from_card(screenshot_path, rect)
+        return ""
 
     def _extract_price_digits(self, text):
-        """Extract the numeric portion of a ticket price label."""
-        normalized_text = text if isinstance(text, str) else ""
-        match = re.search(r"([1-9]\d{1,4})", normalized_text)
-        if match:
-            return int(match.group(1))
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._extract_price_digits(text)
         return None
 
     def _price_text_matches_target(self, text):
-        """Check whether a visible price label matches the configured price."""
-        normalized_target = normalize_text(self.config.price)
-        normalized_text = normalize_text(text)
-        if normalized_target and normalized_text:
-            if normalized_target in normalized_text or normalized_text in normalized_target:
-                return True
-
-        target_digits = self._extract_price_digits(self.config.price)
-        text_digits = self._extract_price_digits(text)
-        return target_digits is not None and target_digits == text_digits
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._price_text_matches_target(text)
+        return False
 
     def _is_price_option_available(self, option):
-        """Return whether a visible price option is actually selectable."""
-        tag = (option.get("tag") or "").strip()
-        return tag not in _PRICE_UNAVAILABLE_TAGS
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._is_price_option_available(option)
+        return True
 
     def _click_visible_price_option(self, card_index):
-        """Click a visible price card by its clickable-card index."""
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-            cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            return False
-
-        clickable_cards = [card for card in cards if self._is_clickable(card)]
-        if 0 <= card_index < len(clickable_cards):
-            self._click_element_center(clickable_cards[card_index], duration=30)
-            return True
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._click_visible_price_option(card_index)
         return False
 
     def _click_price_option_by_config_index(self, burst=False, coords=None):
-        """Click the configured price card index directly without reading ticket texts."""
-        target_coords = coords or self._get_price_option_coordinates_by_config_index()
-        if not target_coords:
-            return False
-        if burst:
-            self._burst_click_coordinates(*target_coords, count=2, interval_ms=25, duration=25)
-        else:
-            self._click_coordinates(*target_coords, duration=30)
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        return True
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._click_price_option_by_config_index(burst, coords)
+        return False
 
     def _select_price_option_fast(self, cached_coords=None):
-        """Use config-driven, low-latency ticket selection before OCR-heavy fallbacks."""
-        if self.config.rush_mode:
-            # 真实提交模式用 burst（双击保险），验证模式单击即可（节省 ~0.2s）。
-            _burst = self.config.if_commit_order
-            if self._click_price_option_by_config_index(burst=_burst, coords=cached_coords):
-                return True
-
-        visible_options = self.get_visible_price_options(allow_ocr=False)
-
-        if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self.config.price_index), None)
-            if indexed_option:
-                if not self._is_price_option_available(indexed_option):
-                    logger.warning(
-                        f"配置索引对应票档当前不可选: {indexed_option.get('text') or '(未识别)'} "
-                        f"[{indexed_option.get('tag') or '不可售'}]"
-                    )
-                    return False
-                if not indexed_option.get("text") or self._price_text_matches_target(indexed_option.get("text") or ""):
-                    if self._click_visible_price_option(indexed_option["index"]):
-                        logger.info(
-                            f"通过配置索引快速选择票价: {indexed_option.get('text') or self.config.price} "
-                            f"(price_index={self.config.price_index})"
-                        )
-                        return True
-            elif self._click_price_option_by_config_index():
-                return True
-
-            matched_options = [
-                option for option in visible_options
-                if self._price_text_matches_target(option.get("text") or "")
-            ]
-            for option in matched_options:
-                if not self._is_price_option_available(option):
-                    logger.warning(
-                        f"目标票档当前不可选: {option.get('text') or '(未识别)'} [{option.get('tag') or '不可售'}]"
-                    )
-                    return False
-                if self._click_visible_price_option(option["index"]):
-                    logger.info(
-                        f"通过可见票档快速匹配选择票价: {option.get('text') or self.config.price} "
-                        f"(index={option['index']})"
-                    )
-                    return True
-
-        price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.35):
-            logger.info(f"通过文本快速匹配选择票价: {self.config.price}")
-            return True
-
-        if self._click_price_option_by_config_index():
-            return True
-
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._select_price_option_fast(cached_coords)
         return None
 
     def _select_price_option(self, cached_coords=None):
-        """Select the configured price using fast config-driven logic first, then OCR-heavy fallbacks."""
-        fast_result = self._select_price_option_fast(cached_coords=cached_coords)
-        if fast_result is not None:
-            return fast_result
-
-        visible_options = self.get_visible_price_options()
-        matched_options = [option for option in visible_options if self._price_text_matches_target(option.get("text") or "")]
-
-        for option in matched_options:
-            if not self._is_price_option_available(option):
-                logger.warning(
-                    f"目标票档当前不可选: {option.get('text') or '(未识别)'} [{option.get('tag') or '不可售'}]"
-                )
-                return False
-            if self._click_visible_price_option(option["index"]):
-                logger.info(
-                    f"通过可见票档匹配选择票价: {option.get('text') or self.config.price} "
-                    f"(index={option['index']}, source={option.get('source', 'ui')})"
-                )
-                return True
-
-        if visible_options:
-            indexed_option = next((option for option in visible_options if option["index"] == self.config.price_index), None)
-            if indexed_option and self._is_price_option_available(indexed_option):
-                if self._click_visible_price_option(indexed_option["index"]):
-                    logger.info(
-                        f"文本匹配未命中，使用当前可见票档索引选择: {indexed_option.get('text') or self.config.price} "
-                        f"(price_index={self.config.price_index})"
-                    )
-                    return True
-            elif indexed_option and not self._is_price_option_available(indexed_option):
-                logger.warning(
-                    f"配置索引对应票档当前不可选: {indexed_option.get('text') or '(未识别)'} "
-                    f"[{indexed_option.get('tag') or '不可售'}]"
-                )
-                return False
-
-        price_text_selector = f'new UiSelector().textContains("{self.config.price}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, price_text_selector, timeout=0.8):
-            logger.info(f"通过文本匹配选择票价: {self.config.price}")
-            return True
-
-        logger.info(f"文本匹配失败，使用索引选择票价: price_index={self.config.price_index}")
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-            if not self._using_u2():
-                target_price = price_container.find_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                )
-            else:
-                cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-                clickable_cards = [card for card in cards if self._is_clickable(card)]
-                target_price = clickable_cards[self.config.price_index]
-            self._click_element_center(target_price, duration=30)
-            return True
-        except Exception as e:
-            logger.warning(f"票价选择失败，启动备用方案: {e}")
-            try:
-                if not self._using_u2() and self.wait is not None:
-                    price_container = self.wait.until(
-                        EC.presence_of_element_located((By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"))
-                    )
-                else:
-                    price_container = self._wait_for_element(
-                        By.ID,
-                        "cn.damai:id/project_detail_perform_price_flowlayout",
-                        timeout=2,
-                    )
-                if not self._using_u2():
-                    target_price = price_container.find_element(
-                        AppiumBy.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().className("android.widget.FrameLayout").index({self.config.price_index}).clickable(true)'
-                    )
-                else:
-                    cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-                    clickable_cards = [card for card in cards if self._is_clickable(card)]
-                    target_price = clickable_cards[self.config.price_index]
-                self._click_element_center(target_price, duration=30)
-                return True
-            except Exception as backup_error:
-                logger.warning(f"备用票价选择也失败: {backup_error}")
-                return False
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._select_price_option(cached_coords)
+        return False
 
     def _keyword_tokens(self):
-        """Split the configured keyword into reusable fuzzy-match tokens."""
-        keyword = self.config.keyword or ""
-        tokens = []
-        for raw in re.split(r"[\s,，、|/]+", keyword):
-            token = normalize_text(raw)
-            if len(token) >= 2 and token not in tokens:
-                tokens.append(token)
-        return tokens
-
-    @staticmethod
-    def _xml_find_text_by_resource_id(xml_root, resource_id):
-        """Return text of the first node matching resource_id in a pre-parsed hierarchy XML."""
-        if xml_root is None:
-            return ""
-        for node in xml_root.iter("node"):
-            if node.get("resource-id") == resource_id:
-                text = (node.get("text") or "").strip()
-                if text:
-                    return text
-        return ""
+        if hasattr(self, "_navigator"):
+            return self._navigator._keyword_tokens()
+        return []
 
     def _get_detail_title_text(self, xml_root=None):
         """Read title text from detail/sku pages."""
@@ -1681,7 +540,10 @@ class DamaiBot:
                 return title
             parts = [
                 self._xml_find_text_by_resource_id(xml_root, rid)
-                for rid in ("cn.damai:id/project_title_tv1", "cn.damai:id/project_title_tv2")
+                for rid in (
+                    "cn.damai:id/project_title_tv1",
+                    "cn.damai:id/project_title_tv2",
+                )
             ]
             return "".join(p.strip() for p in parts if p).strip()
 
@@ -1695,7 +557,10 @@ class DamaiBot:
             return title
 
         title_parts = []
-        for resource_id in ("cn.damai:id/project_title_tv1", "cn.damai:id/project_title_tv2"):
+        for resource_id in (
+            "cn.damai:id/project_title_tv1",
+            "cn.damai:id/project_title_tv2",
+        ):
             part = self._safe_element_text(self.driver, By.ID, resource_id)
             if part:
                 title_parts.append(part.strip())
@@ -1703,43 +568,18 @@ class DamaiBot:
         return "".join(title_parts).strip()
 
     def _title_matches_target(self, title_text):
-        """Check whether a page or search result title matches the configured target."""
-        normalized_title = normalize_text(title_text)
-        if not normalized_title:
-            return False
-
-        candidates = []
-        if self.item_detail:
-            candidates.extend([self.item_detail.item_name, self.item_detail.item_name_display])
-        if self.config.target_title:
-            candidates.append(self.config.target_title)
-        if self.config.keyword:
-            candidates.append(self.config.keyword)
-
-        for candidate in candidates:
-            normalized_candidate = normalize_text(candidate)
-            if not normalized_candidate:
-                continue
-            if normalized_candidate in normalized_title or normalized_title in normalized_candidate:
-                return True
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens and all(token in normalized_title for token in keyword_tokens):
-            return True
-
+        if hasattr(self, "_navigator"):
+            return self._navigator._title_matches_target(title_text)
         return False
 
     def _current_page_matches_target(self, page_probe):
-        """Check if the current detail/sku page already points at the expected event."""
-        if page_probe["state"] not in {"detail_page", "sku_page"}:
-            return False
+        if hasattr(self, "_navigator"):
+            return self._navigator._current_page_matches_target(page_probe)
+        return False
 
-        if not self.item_detail and not self.config.target_title and not self.config.keyword:
-            return True
-
-        return self._title_matches_target(self._get_detail_title_text())
-
-    def _exit_non_target_event_context(self, page_probe, max_back_steps=4, back_delay=0.5):
+    def _exit_non_target_event_context(
+        self, page_probe, max_back_steps=4, back_delay=0.5
+    ):
         """Back out from a non-target detail/sku page until search/homepage is reachable."""
         current_probe = page_probe
 
@@ -1783,40 +623,31 @@ class DamaiBot:
 
         return self.probe_current_page()
 
-    def _probe_recovery_state(self):
-        """Lightweight page probe for recovery: only check detail/sku/confirm states.
-
-        Uses 2-3 element lookups (~240-360ms) instead of the full
-        probe_current_page which does 12+ lookups (~1.5s).
-        """
-        # Check detail_page first (most common recovery target).
-        if self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"):
-            return {"state": "detail_page", "purchase_button": True, "price_container": False,
-                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                    "pending_order_dialog": False}
-        # Check sku_page (one back away from detail).
-        if self._has_element(By.ID, "cn.damai:id/layout_sku") or \
-                self._has_element(By.ID, "cn.damai:id/sku_contanier"):
-            return {"state": "sku_page", "purchase_button": False, "price_container": True,
-                    "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                    "pending_order_dialog": False}
-        return {"state": "unknown", "purchase_button": False, "price_container": False,
-                "quantity_picker": False, "submit_button": False, "reservation_mode": False,
-                "pending_order_dialog": False}
-
-    def _recover_to_detail_page_for_local_retry(self, initial_probe=None, max_back_steps=4, back_delay=0.2):
+    def _recover_to_detail_page_for_local_retry(
+        self, initial_probe=None, max_back_steps=8, back_delay=0.15
+    ):
         """Recover locally to the current event detail/sku page without rebuilding the Appium session."""
-        current_probe = initial_probe or self.probe_current_page()
+        # Delegate to RecoveryHelper if available
+        if hasattr(self, "_recovery") and initial_probe is None:
+            result = self._recovery.recover_to_detail_page()
+            if result["state"] in {"detail_page", "sku_page"}:
+                return result
+            # Fall through to existing logic if recovery failed
+
+        # Original logic below (unchanged)
+        current_probe = initial_probe or self.probe_current_page(fast=True)
         retryable_states = {"detail_page", "sku_page"}
 
         if current_probe["state"] in retryable_states and (
-                not self.item_detail or self._current_page_matches_target(current_probe)):
+            not self.item_detail or self._current_page_matches_target(current_probe)
+        ):
             return current_probe
 
         self.dismiss_startup_popups()
         current_probe = self.probe_current_page()
         if current_probe["state"] in retryable_states and (
-                not self.item_detail or self._current_page_matches_target(current_probe)):
+            not self.item_detail or self._current_page_matches_target(current_probe)
+        ):
             return current_probe
 
         for _ in range(max_back_steps):
@@ -1825,389 +656,71 @@ class DamaiBot:
             time.sleep(back_delay)
             # Use lightweight probe during back-navigation (skip popup
             # dismissal and full probe — saves ~2s per step).
-            current_probe = self._probe_recovery_state()
+            current_probe = self.probe_current_page(fast=True)
             if current_probe["state"] in retryable_states and (
-                    not self.item_detail or self._current_page_matches_target(current_probe)):
+                not self.item_detail or self._current_page_matches_target(current_probe)
+            ):
                 return current_probe
+
+        # If we ended up on homepage, try forward navigation
+        if current_probe["state"] in {"homepage"}:
+            logger.info("回退到首页，尝试正向导航回详情页")
+            self.navigate_to_target_event()
+            current_probe = self.probe_current_page()
 
         return current_probe
 
     def _open_search_from_homepage(self):
-        """Enter the homepage search flow."""
-        search_selectors = [
-            (By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"),
-            (By.ID, "cn.damai:id/homepage_header_search"),
-            (By.ID, "cn.damai:id/homepage_header_search_layout"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("搜索")'),
-        ]
-
-        for by, value in search_selectors:
-            if self.ultra_fast_click(by, value, timeout=0.8):
-                search_probe = self.wait_for_page_state({"search_page"}, timeout=2.5, poll_interval=0.15)
-                if search_probe["state"] == "search_page":
-                    return True
-
-        search_probe = self.probe_current_page()
-        if search_probe["state"] == "search_page":
-            return True
-
-        logger.warning("未能从首页打开搜索页")
+        if hasattr(self, "_navigator"):
+            return self._navigator._open_search_from_homepage()
         return False
 
     def _submit_search_keyword(self):
-        """Fill the configured keyword into the Damai search box and submit."""
-        if not self.config.keyword:
-            logger.warning("缺少 keyword，无法执行自动搜索")
-            return False
-
-        with self._timed_step(
-                "搜索页输入并提交关键词",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索页输入并提交关键词")):
-            try:
-                search_input = self._wait_for_element(By.ID, "cn.damai:id/header_search_v2_input", timeout=2)
-            except TimeoutException:
-                logger.warning("未找到搜索输入框")
-                return False
-
-            self._click_element_center(search_input)
-            time.sleep(0.12)
-
-            current_text = self._read_element_text(search_input).strip()
-            if current_text and current_text != self.config.keyword:
-                if self._has_element(By.ID, "cn.damai:id/header_search_v2_input_delete"):
-                    self.ultra_fast_click(By.ID, "cn.damai:id/header_search_v2_input_delete", timeout=0.4)
-                    time.sleep(0.05)
-                else:
-                    try:
-                        if hasattr(search_input, "clear"):
-                            search_input.clear()
-                        elif hasattr(search_input, "set_text"):
-                            search_input.set_text("")
-                    except Exception:
-                        pass
-
-            if self._read_element_text(search_input).strip() != self.config.keyword:
-                try:
-                    if self._using_u2() and hasattr(search_input, "set_text"):
-                        search_input.set_text(self.config.keyword)
-                    elif hasattr(search_input, "send_keys"):
-                        search_input.send_keys(self.config.keyword)
-                    elif hasattr(search_input, "set_text"):
-                        search_input.set_text(self.config.keyword)
-                except Exception:
-                    return False
-
-            if not self._press_keycode_safe(66, context="提交搜索关键词"):
-                return False
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("演出")'):
-                self.smart_wait_and_click(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
-                    'new UiSelector().text("演出")',
-                    timeout=0.8,
-                )
-                time.sleep(0.1)
-            try:
-                deadline = time.time() + 3.5
-                while time.time() < deadline:
-                    if self._find_all(By.ID, "cn.damai:id/ll_search_item"):
-                        break
-                    time.sleep(0.04)
-                else:
-                    raise TimeoutException("搜索结果加载超时")
-            except TimeoutException:
-                logger.warning("搜索结果加载超时")
-                return False
-
-        return True
+        if hasattr(self, "_navigator"):
+            return self._navigator._submit_search_keyword()
+        return False
 
     def _score_search_result(self, title_text, venue_text):
-        """Score a search result against the configured target."""
-        normalized_title = normalize_text(title_text)
-        normalized_venue = normalize_text(venue_text)
-        if not normalized_title:
-            return -1
-
-        score = 0
-        if self._title_matches_target(title_text):
-            score += 100
-
-        normalized_keyword = normalize_text(self.config.keyword)
-        if normalized_keyword:
-            if normalized_keyword == normalized_title:
-                score += 80
-            elif normalized_keyword in normalized_title:
-                score += 50
-
-        keyword_tokens = self._keyword_tokens()
-        if keyword_tokens:
-            token_hits = sum(1 for token in keyword_tokens if token in normalized_title)
-            score += token_hits * 20
-            if token_hits == len(keyword_tokens) and len(keyword_tokens) >= 2:
-                score += 30
-
-        normalized_city = normalize_text(city_keyword(self.config.city))
-        if normalized_city and normalized_city in normalized_title:
-            score += 20
-
-        if self.item_detail:
-            expected_venue = normalize_text(self.item_detail.venue_name)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 20
-
-            expected_city = normalize_text(self.item_detail.city_keyword)
-            if expected_city and expected_city in normalized_title:
-                score += 10
-
-        if self.config.target_venue:
-            expected_venue = normalize_text(self.config.target_venue)
-            if expected_venue and expected_venue in normalized_venue:
-                score += 30
-
-        return score
+        if hasattr(self, "_navigator"):
+            return self._navigator._score_search_result(title_text, venue_text)
+        return -1
 
     def _scroll_search_results(self):
-        """Scroll the search result list upward."""
-        if not self._using_u2():
-            self.driver.execute_script(
-                "mobile: swipeGesture",
-                {
-                    "left": 96,
-                    "top": 520,
-                    "width": 1088,
-                    "height": 1500,
-                    "direction": "up",
-                    "percent": 0.55,
-                    "speed": 5000,
-                },
+        if hasattr(self, "_navigator"):
+            return self._navigator._scroll_search_results()
+
+    def _open_target_from_search_results(
+        self, max_scrolls=2, max_results=5, return_details=False
+    ):
+        if hasattr(self, "_navigator"):
+            return self._navigator._open_target_from_search_results(
+                max_scrolls, max_results, return_details
             )
-            return
-        self.d.swipe(540, 1770, 540, 520, duration=0.3)
-
-    def _open_target_from_search_results(self, max_scrolls=2, max_results=5, return_details=False):
-        """Open the best-matching event from search results and optionally return scanned summaries."""
-        seen_titles = set()
-        collected = []
-
-        with self._timed_step(
-                "搜索结果扫描并打开目标",
-                manual_baseline_seconds=_MANUAL_STEP_BASELINES.get("搜索结果扫描并打开目标")):
-            for scroll_index in range(max_scrolls + 1):
-                result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
-                best_match = None
-                best_score = -1
-
-                for card in result_cards:
-                    title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                    if not title_text:
-                        continue
-
-                    venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                    city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                    time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
-                    score = self._score_search_result(title_text, venue_text)
-
-                    normalized_title = normalize_text(title_text)
-                    if normalized_title and normalized_title not in seen_titles:
-                        collected.append({
-                            "title": title_text,
-                            "venue": venue_text,
-                            "city": city_text,
-                            "time": time_text,
-                            "score": score,
-                        })
-                        seen_titles.add(normalized_title)
-
-                    if score > best_score:
-                        best_score = score
-                        best_match = card
-
-                if best_match is not None and best_score >= 60:
-                    self._click_element_center(best_match)
-                    detail_probe = self.wait_for_page_state({"detail_page", "sku_page"}, timeout=5.5)
-                    if detail_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(detail_probe):
-                        collected.sort(key=lambda item: item["score"], reverse=True)
-                        details = {"opened": True, "search_results": collected[:max_results]}
-                        return details if return_details else True
-
-                    logger.warning("已进入详情页，但标题与目标演出不一致，返回搜索结果继续尝试")
-                    if not self._press_keycode_safe(4, context="返回搜索列表"):
-                        break
-                    time.sleep(0.25)
-                    self.dismiss_startup_popups()
-                else:
-                    logger.info(f"本屏搜索结果未找到明确匹配项，已扫描: {len(seen_titles)} 条")
-
-                if scroll_index < max_scrolls:
-                    self._scroll_search_results()
-                    time.sleep(0.2)
-
-        logger.warning("自动搜索后未找到目标演出")
-        collected.sort(key=lambda item: item["score"], reverse=True)
-        details = {"opened": False, "search_results": collected[:max_results]}
-        return details if return_details else False
+        return {"opened": False, "search_results": []} if return_details else False
 
     def collect_search_results(self, max_scrolls=0, max_results=5):
-        """Collect search result summaries without opening them."""
-        seen = set()
-        collected = []
-
-        for scroll_index in range(max_scrolls + 1):
-            result_cards = self._find_all(By.ID, "cn.damai:id/ll_search_item")
-            for card in result_cards:
-                title_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_name")
-                if not title_text:
-                    continue
-
-                normalized_title = normalize_text(title_text)
-                if normalized_title in seen:
-                    continue
-
-                venue_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_venueName")
-                city_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_city").replace("|", "").strip()
-                time_text = self._safe_element_text(card, By.ID, "cn.damai:id/tv_project_time")
-                price_text = self._build_compound_price_text(card)
-                score = self._score_search_result(title_text, venue_text)
-
-                collected.append({
-                    "title": title_text,
-                    "venue": venue_text,
-                    "city": city_text,
-                    "time": time_text,
-                    "price": price_text,
-                    "score": score,
-                })
-                seen.add(normalized_title)
-
-            if len(collected) >= max_results:
-                break
-
-            if scroll_index < max_scrolls:
-                self._scroll_search_results()
-                time.sleep(0.4)
-
-        collected.sort(key=lambda item: item["score"], reverse=True)
-        return collected[:max_results]
+        if hasattr(self, "_navigator"):
+            return self._navigator.collect_search_results(max_scrolls, max_results)
+        return []
 
     def navigate_to_target_event(self, initial_probe=None):
-        """Auto-navigate from homepage/search to the target event detail page."""
-        if not self.config.auto_navigate:
-            return False
+        """Navigate to the target event. Delegates to EventNavigator."""
+        if hasattr(self, "_navigator") and self._navigator is not None:
+            return self._navigator.navigate_to_target_event(initial_probe=initial_probe)
+        return self._navigate_to_target_impl(initial_probe=initial_probe)
 
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
+    def _navigate_to_target_impl(self, initial_probe=None):
+        if hasattr(self, "_navigator"):
+            return self._navigator._navigate_to_target_impl(initial_probe)
+        return False
 
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return True
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            page_probe = self._exit_non_target_event_context(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return True
-
-        if page_probe["state"] == "homepage":
-            logger.info("当前位于首页，开始自动搜索目标演出")
-            if not self._open_search_from_homepage():
-                return False
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合自动搜索: {page_probe['state']}")
-            return False
-
-        if not self._submit_search_keyword():
-            return False
-
-        return self._open_target_from_search_results()
-
-    def discover_target_event(self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5):
-        """Try multiple keywords, collect candidate summaries, and open the best match."""
-        self._last_discovery_step_timings = []
-        page_probe = initial_probe or self.probe_current_page()
-        page_probe = self._recover_to_navigation_start(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return {
-                "used_keyword": self.config.keyword,
-                "search_results": [],
-                "page_probe": page_probe,
-                "step_timings": list(self._last_discovery_step_timings),
-            }
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and not self._current_page_matches_target(page_probe):
-            page_probe = self._exit_non_target_event_context(page_probe)
-
-        if page_probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(page_probe):
-            return {
-                "used_keyword": self.config.keyword,
-                "search_results": [],
-                "page_probe": page_probe,
-                "step_timings": list(self._last_discovery_step_timings),
-            }
-
-        if page_probe["state"] == "homepage":
-            if not self._open_search_from_homepage():
-                return None
-            page_probe = self.probe_current_page()
-
-        if page_probe["state"] != "search_page":
-            logger.warning(f"当前页面不适合执行提示词检索: {page_probe['state']}")
-            return None
-
-        tried = set()
-        for keyword in keyword_candidates:
-            normalized_keyword = normalize_text(keyword)
-            if not normalized_keyword or normalized_keyword in tried:
-                continue
-
-            # 关键词重试前：关闭弹窗并归一化到 search_page
-            if tried:
-                self.dismiss_startup_popups()
-                probe = self.probe_current_page()
-                if probe["state"] in {"detail_page", "sku_page"}:
-                    probe = self._exit_non_target_event_context(probe)
-                    if probe["state"] in {"detail_page", "sku_page"} and self._current_page_matches_target(probe):
-                        return {
-                            "used_keyword": keyword,
-                            "search_results": [],
-                            "page_probe": probe,
-                            "step_timings": list(self._last_discovery_step_timings),
-                        }
-                if probe["state"] == "homepage":
-                    if not self._open_search_from_homepage():
-                        logger.warning("重试关键词前无法从首页进入搜索页，跳过该关键词")
-                        continue
-                    probe = self.probe_current_page()
-                if probe["state"] != "search_page":
-                    logger.warning(f"重试关键词前页面状态异常: {probe['state']}，跳过该关键词")
-                    continue
-
-            self.config.keyword = keyword
-            logger.info(f"尝试搜索关键词: {keyword}")
-            if not self._submit_search_keyword():
-                tried.add(normalized_keyword)
-                continue
-
-            open_result = self._open_target_from_search_results(
-                max_scrolls=search_scrolls,
-                max_results=result_limit,
-                return_details=True,
+    def discover_target_event(
+        self, keyword_candidates, initial_probe=None, search_scrolls=1, result_limit=5
+    ):
+        if hasattr(self, "_navigator"):
+            return self._navigator.discover_target_event(
+                keyword_candidates, initial_probe, search_scrolls, result_limit
             )
-            search_results = open_result["search_results"]
-            if search_results:
-                logger.info(f"搜索到 {len(search_results)} 条候选结果，最高分 {search_results[0]['score']}")
-            if open_result["opened"]:
-                page_probe = self.probe_current_page()
-                return {
-                    "used_keyword": keyword,
-                    "search_results": search_results,
-                    "page_probe": page_probe,
-                    "step_timings": list(self._last_discovery_step_timings),
-                }
-
-            tried.add(normalized_keyword)
-
-        logger.warning("根据提示词尝试多个搜索关键词后，仍未打开目标演出")
         return None
 
     def select_performance_date(self, timeout=1.0):
@@ -2216,7 +729,7 @@ class DamaiBot:
             return
 
         date_selector = f'new UiSelector().textContains("{self.config.date}")'
-        if self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, date_selector, timeout=timeout):
+        if self.ultra_fast_click(ANDROID_UIAUTOMATOR, date_selector, timeout=timeout):
             logger.info(f"选择场次日期: {self.config.date}")
         else:
             logger.debug(f"未找到日期 '{self.config.date}'，使用默认场次")
@@ -2224,11 +737,16 @@ class DamaiBot:
     def _select_city_from_detail_page(self, timeout=1.0):
         """Select the configured city on the detail page."""
         city_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().textContains("{self.config.city}")'),
-            (By.XPATH, f'//*[@text="{self.config.city}"]')
+            (ANDROID_UIAUTOMATOR, f'new UiSelector().text("{self.config.city}")'),
+            (
+                ANDROID_UIAUTOMATOR,
+                f'new UiSelector().textContains("{self.config.city}")',
+            ),
+            (By.XPATH, f'//*[@text="{self.config.city}"]'),
         ]
-        return self.smart_wait_and_click(*city_selectors[0], city_selectors[1:], timeout=timeout)
+        return self.smart_wait_and_click(
+            *city_selectors[0], city_selectors[1:], timeout=timeout
+        )
 
     def _prepare_detail_page_hot_path(self):
         """Preselect detail-page filters before the sale opens so launch-time work is minimized."""
@@ -2247,94 +765,37 @@ class DamaiBot:
 
         return prepared
 
-    def _extract_coords_from_xml_node(self, node):
-        """Extract center (x, y) from an XML node's bounds attribute."""
-        bounds = self._parse_bounds(node.get("bounds", ""))
-        if bounds:
-            left, top, right, bottom = bounds
-            return ((left + right) // 2, (top + bottom) // 2)
-        return None
-
     def _rush_preselect_and_buy_via_xml(self):
-        """Cold rush path: single XML dump to find city/date/buy button and cache coords.
-
-        Replaces 3-6 sequential _cached_tap HTTP calls (~3-4s cold) with 1 dump_hierarchy
-        (~0.3s) + local XML parsing + 2-3 cached clicks (~0.2-0.3s).
-        Returns (buy_clicked: bool).
-        """
-        xml_root = self._dump_hierarchy_xml()
-        if xml_root is None:
-            return False
-
-        # --- Extract coords from single XML dump ---
-        buy_coords = None
-        city_coords = None
-        date_coords = None
-
-        for node in xml_root.iter("node"):
-            rid = node.get("resource-id", "")
-            text = node.get("text", "")
-
-            # Purchase button (detail page)
-            if not buy_coords and rid in (
-                "trade_project_detail_purchase_status_bar_container_fl",
-                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
-            ):
-                buy_coords = self._extract_coords_from_xml_node(node)
-
-            # City match
-            if not city_coords and self.config.city and text and self.config.city in text:
-                city_coords = self._extract_coords_from_xml_node(node)
-
-            # Date match
-            if not date_coords and self.config.date and text and self.config.date in text:
-                date_coords = self._extract_coords_from_xml_node(node)
-
-        # --- Cache coords and batch-click via shell ---
-        tap_cmds = []
-        if date_coords:
-            self._cached_hot_path_coords["date"] = date_coords
-            tap_cmds.append(f"input tap {int(date_coords[0])} {int(date_coords[1])}")
-            logger.info(f"极速模式预选日期: {self.config.date}")
-        elif self.config.date:
-            self._cached_hot_path_no_match.add("date")
-
-        if city_coords:
-            self._cached_hot_path_coords["city"] = city_coords
-            tap_cmds.append(f"input tap {int(city_coords[0])} {int(city_coords[1])}")
-            logger.info(f"极速模式预选城市: {self.config.city}")
-        elif self.config.city:
-            self._cached_hot_path_no_match.add("city")
-
-        if buy_coords:
-            self._cached_hot_path_coords["detail_buy"] = buy_coords
-            logger.info("点击购票按钮...")
-            tap_cmds.append(f"input tap {int(buy_coords[0])} {int(buy_coords[1])}")
-            self.d.shell("; ".join(tap_cmds))
-            return True
-
-        if tap_cmds:
-            self.d.shell("; ".join(tap_cmds))
-        return False
+        self._ensure_pipeline()
+        return self._pipeline.rush_preselect_and_buy_via_xml()
 
     def _enter_purchase_flow_from_detail_page(self, prepared=False):
         """Open the purchase panel from the detail page with a low-latency hot path."""
+        if self.config.rush_mode:
+            self._dismiss_fast_blocking_dialogs()
         if not prepared:
             if self.config.rush_mode:
                 # 极速模式冷路径：单次 XML dump 提取所有坐标（~0.3s），替代多次 _cached_tap（~3-4s）。
                 # 热路径（有缓存）用 _cached_tap 直接点击缓存坐标（1次 HTTP/元素）。
-                if self._using_u2() and not self._cached_hot_path_coords.get("detail_buy"):
+                if self._using_u2() and not self._cached_hot_path_coords.get(
+                    "detail_buy"
+                ):
                     # Cold path: single XML dump for all detail page elements.
                     if self._rush_preselect_and_buy_via_xml():
-                        next_probe = self._wait_for_purchase_entry_result(timeout=6.0, poll_interval=0.03)
+                        next_probe = self._wait_for_purchase_entry_result(
+                            timeout=6.0, poll_interval=0.03
+                        )
                         if next_probe["state"] in {"sku_page", "order_confirm_page"}:
                             return next_probe
                 else:
                     # Warm path: cached coords for date/city/buy.
-                    if self.config.date and "date" not in self._cached_hot_path_no_match:
+                    if (
+                        self.config.date
+                        and "date" not in self._cached_hot_path_no_match
+                    ):
                         _date_found = self._cached_tap(
                             "date",
-                            AppiumBy.ANDROID_UIAUTOMATOR,
+                            ANDROID_UIAUTOMATOR,
                             f'new UiSelector().textContains("{self.config.date}")',
                             timeout=0.1,
                         )
@@ -2342,17 +803,20 @@ class DamaiBot:
                             logger.info(f"极速模式预选日期: {self.config.date}")
                         elif "date" not in self._cached_hot_path_coords:
                             self._cached_hot_path_no_match.add("date")
-                    if self.config.city and "city" not in self._cached_hot_path_no_match:
+                    if (
+                        self.config.city
+                        and "city" not in self._cached_hot_path_no_match
+                    ):
                         _city_found = self._cached_tap(
                             "city",
-                            AppiumBy.ANDROID_UIAUTOMATOR,
+                            ANDROID_UIAUTOMATOR,
                             f'new UiSelector().text("{self.config.city}")',
                             timeout=0.2,
                         )
                         if not _city_found:
                             _city_found = self._cached_tap(
                                 "city",
-                                AppiumBy.ANDROID_UIAUTOMATOR,
+                                ANDROID_UIAUTOMATOR,
                                 f'new UiSelector().textContains("{self.config.city}")',
                                 timeout=0.15,
                             )
@@ -2375,26 +839,38 @@ class DamaiBot:
             # 点击一次后等足够长时间，避免重复点击重置 sku_page 加载。
             _buy_clicked = self._cached_tap(
                 "detail_buy",
-                By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl", timeout=0.2
+                By.ID,
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+                timeout=0.2,
             )
             if not _buy_clicked:
                 _buy_clicked = self._cached_tap(
                     "detail_buy",
-                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    ANDROID_UIAUTOMATOR,
                     'new UiSelector().textMatches(".*购票.*|.*抢票.*|.*购买.*|.*立即.*")',
                     timeout=0.25,
                 )
             if _buy_clicked:
-                next_probe = self._wait_for_purchase_entry_result(timeout=6.0, poll_interval=0.03)
+                next_probe = self._wait_for_purchase_entry_result(
+                    timeout=6.0, poll_interval=0.03
+                )
                 if next_probe["state"] in {"sku_page", "order_confirm_page"}:
                     return next_probe
 
         book_selectors = [
-            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
-            (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]')
+            (
+                By.ID,
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+            ),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")',
+            ),
+            (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]'),
         ]
-        if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:], timeout=0.8):
+        if not self.smart_wait_and_click(
+            *book_selectors[0], book_selectors[1:], timeout=0.8
+        ):
             logger.warning("购票按钮点击失败")
             return None
         return self._wait_for_purchase_entry_result(timeout=5, poll_interval=0.08)
@@ -2411,7 +887,7 @@ class DamaiBot:
             'new UiSelector().textContains("登录/注册")',
         ]
         for selector in login_prompt_selectors:
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, selector):
+            if self._has_element(ANDROID_UIAUTOMATOR, selector):
                 logger.error("检测到登录提示，请重新登录大麦 App")
                 return False
 
@@ -2420,11 +896,18 @@ class DamaiBot:
     def _purchase_bar_text_ready(self):
         """Inspect the detail-page CTA text and decide whether sale has opened."""
         try:
-            purchase_bar = self._find(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
+            purchase_bar = self._find(
+                By.ID,
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+            )
         except Exception:
             return False
 
-        texts = [text.strip() for text in self._collect_descendant_texts(purchase_bar) if text.strip()]
+        texts = [
+            text.strip()
+            for text in self._collect_descendant_texts(purchase_bar)
+            if text.strip()
+        ]
         merged = normalize_text("".join(texts))
         if not merged:
             return False
@@ -2435,20 +918,24 @@ class DamaiBot:
     def _is_sale_ready(self):
         """Check whether the current UI state is actionable for purchase."""
         ready_selectors = [
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即购买")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即抢票")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("选座购买")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即提交")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交订单")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即购买")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即抢票")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("选座购买")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("立即提交")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交订单")'),
         ]
         for by, value in ready_selectors:
             if self._has_element(by, value):
                 return True
 
-        if self._has_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"):
+        if self._has_element(
+            By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+        ):
             return not self.is_reservation_sku_mode()
 
-        if self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"):
+        if self._has_element(
+            By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        ):
             return self._purchase_bar_text_ready()
 
         return False
@@ -2482,6 +969,13 @@ class DamaiBot:
             )
             time.sleep(sleep_seconds)
 
+        # Use BuyButtonGuard for precise button-text monitoring
+        if hasattr(self, "_guard") and self._guard.wait_until_safe(
+            timeout_s=8.0, poll_ms=50
+        ):
+            logger.info("BuyButtonGuard 检测到可购买按钮")
+            return
+
         # Tight polling loop with multiple purchase signals until the page becomes actionable.
         deadline = sell_time + timedelta(seconds=8)
         while datetime.now(tz=_tz_shanghai) < deadline:
@@ -2512,29 +1006,47 @@ class DamaiBot:
                 return "success"
 
             # Check page text for various outcomes
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'):
+            if self._has_element(
+                ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("未支付")'
+            ):
                 logger.warning("已有未支付订单")
                 return "existing_order"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已售罄")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("库存不足")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("暂时无票")'):
+            if (
+                self._has_element(
+                    ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已售罄")'
+                )
+                or self._has_element(
+                    ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("库存不足")'
+                )
+                or self._has_element(
+                    ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("暂时无票")'
+                )
+            ):
                 logger.warning("票已售罄")
                 return "sold_out"
-            if self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("滑块")') or \
-               self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("验证")'):
+            if self._has_element(
+                ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("滑块")'
+            ) or self._has_element(
+                ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("验证")'
+            ):
                 logger.warning("触发验证码")
                 return "captcha"
-            if any(self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, selector) for selector in payment_text_selectors):
+            if any(
+                self._has_element(ANDROID_UIAUTOMATOR, selector)
+                for selector in payment_text_selectors
+            ):
                 submit_still_visible = self._has_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    ANDROID_UIAUTOMATOR,
                     'new UiSelector().text("立即提交")',
                 )
                 confirm_title_visible = self._has_element(
-                    AppiumBy.ANDROID_UIAUTOMATOR,
+                    ANDROID_UIAUTOMATOR,
                     'new UiSelector().textContains("确认购买")',
                 )
                 if submit_still_visible or confirm_title_visible:
-                    logger.warning("检测到支付相关文本，但仍在确认购买页，暂不判定提交成功")
+                    logger.warning(
+                        "检测到支付相关文本，但仍在确认购买页，暂不判定提交成功"
+                    )
                 else:
                     logger.info("订单提交成功，检测到支付页关键控件")
                     return "success"
@@ -2554,7 +1066,9 @@ class DamaiBot:
                 submit_success = True
             elif self.ultra_fast_click(*submit_selectors[1], timeout=0.35):
                 submit_success = True
-            elif self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:], timeout=0.6):
+            elif self.smart_wait_and_click(
+                *submit_selectors[0], submit_selectors[1:], timeout=0.6
+            ):
                 submit_success = True
 
             if not submit_success:
@@ -2570,7 +1084,9 @@ class DamaiBot:
             result = self.verify_order_result(timeout=verify_timeout)
             if result != "timeout":
                 return result
-            logger.warning(f"提交后暂未确认结果，快速重试提交 {attempt + 2}/{attempt_count}")
+            logger.warning(
+                f"提交后暂未确认结果，快速重试提交 {attempt + 2}/{attempt_count}"
+            )
 
         return "timeout"
 
@@ -2582,10 +1098,15 @@ class DamaiBot:
         if state in ("detail_page", "sku_page"):
             if self.item_detail and not self._current_page_matches_target(page_probe):
                 if not self.config.auto_navigate:
-                    logger.warning("当前详情页不是目标演出，手动起跑模式下停止本地快速重试")
+                    logger.warning(
+                        "当前详情页不是目标演出，手动起跑模式下停止本地快速重试"
+                    )
                     return False
                 logger.info("当前详情页不是目标演出，转为自动导航")
-                return self.navigate_to_target_event(page_probe) and self.run_ticket_grabbing()
+                return (
+                    self.navigate_to_target_event(page_probe)
+                    and self.run_ticket_grabbing()
+                )
             return self.run_ticket_grabbing()
         elif state == "order_confirm_page":
             if not self.config.if_commit_order:
@@ -2594,30 +1115,45 @@ class DamaiBot:
                     logger.error("开发验证模式下观演人未选择完整，已停止")
                     return False
                 submit_selectors = [
-                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                    (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                    (By.XPATH, '//*[contains(@text,"提交")]')
+                    (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                    (
+                        ANDROID_UIAUTOMATOR,
+                        'new UiSelector().textMatches(".*提交.*|.*确认.*")',
+                    ),
+                    (By.XPATH, '//*[contains(@text,"提交")]'),
                 ]
-                return self.smart_wait_for_element(*submit_selectors[0], submit_selectors[1:])
+                return self.smart_wait_for_element(
+                    *submit_selectors[0], submit_selectors[1:]
+                )
             if not self._ensure_attendees_selected_on_confirm_page():
                 self._set_terminal_failure("attendee_unselected")
                 return False
             submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (By.XPATH, '//*[contains(@text,"提交")]')
+                (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (
+                    ANDROID_UIAUTOMATOR,
+                    'new UiSelector().textMatches(".*提交.*|.*确认.*")',
+                ),
+                (By.XPATH, '//*[contains(@text,"提交")]'),
             ]
             return self.smart_wait_and_click(*submit_selectors[0], submit_selectors[1:])
         elif state == "pending_order_dialog":
             self._set_run_outcome("order_pending_payment")
-            logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+            logger.info(
+                "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
+            )
             return True
         else:
             if self.config.auto_navigate:
-                return self.navigate_to_target_event(page_probe) and self.run_ticket_grabbing()
+                return (
+                    self.navigate_to_target_event(page_probe)
+                    and self.run_ticket_grabbing()
+                )
             recovered_probe = self._recover_to_detail_page_for_local_retry(page_probe)
             if recovered_probe["state"] not in {"detail_page", "sku_page"}:
-                logger.warning(f"本地快速回退后仍未回到演出页，当前状态: {recovered_probe['state']}")
+                logger.warning(
+                    f"本地快速回退后仍未回到演出页，当前状态: {recovered_probe['state']}"
+                )
                 return False
             return self.run_ticket_grabbing()
 
@@ -2629,12 +1165,18 @@ class DamaiBot:
             (By.ID, "android:id/ok"),  # Android 全屏提示
             (By.ID, "cn.damai:id/id_boot_action_agree"),  # 大麦隐私协议
             (By.ID, "cn.damai:id/damai_theme_dialog_cancel_btn"),  # 开启消息通知
-            (By.ID, "cn.damai:id/damai_theme_dialog_close_layout"),  # 新版升级提示关闭按钮
+            (
+                By.ID,
+                "cn.damai:id/damai_theme_dialog_close_layout",
+            ),  # 新版升级提示关闭按钮
             (By.ID, "cn.damai:id/damai_theme_dialog_close_btn"),  # 新版升级提示关闭图标
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("Cancel")'),  # Add to home screen
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("下次再说")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("我知道了")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("知道了")'),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().text("Cancel")',
+            ),  # Add to home screen
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("下次再说")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("我知道了")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("知道了")'),
         ]
 
         for by, value in popup_clicks:
@@ -2645,14 +1187,34 @@ class DamaiBot:
 
         return dismissed
 
+    def _dismiss_fast_blocking_dialogs(self):
+        """Dismiss lightweight blocking dialogs without the full startup scan."""
+        dismissed = False
+        dialog_clicks = [
+            (By.ID, "cn.damai:id/damai_theme_dialog_cancel_btn"),
+            (By.ID, "cn.damai:id/damai_theme_dialog_close_btn"),
+            (By.ID, "cn.damai:id/damai_theme_dialog_close_layout"),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("知道了")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("我知道了")'),
+        ]
+
+        for by, value in dialog_clicks:
+            if not self._has_element(by, value):
+                continue
+            if self.ultra_fast_click(by, value, timeout=0.15):
+                dismissed = True
+                time.sleep(0.05)
+
+        return dismissed
+
     def is_reservation_sku_mode(self):
         """识别当前 SKU 页是否仍处于抢票预约流，而非正式下单流。"""
         reservation_indicators = [
             (By.ID, "cn.damai:id/btn_cancel_reservation"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看场次")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看票档")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交抢票预约")'),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已预约")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看场次")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().text("预约想看票档")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("提交抢票预约")'),
+            (ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("已预约")'),
         ]
 
         return any(self._has_element(by, value) for by, value in reservation_indicators)
@@ -2681,208 +1243,35 @@ class DamaiBot:
         return dates
 
     def get_visible_price_options(self, allow_ocr=True, xml_root=None):
-        """Return visible price options from the current sku page."""
-        import concurrent.futures
-
-        # Fast path: work entirely from a pre-parsed hierarchy XML (no ADB round-trips).
-        if xml_root is not None and self._using_u2():
-            return self._get_visible_price_options_from_xml(xml_root, allow_ocr=allow_ocr)
-
-        try:
-            price_container = self._find(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout")
-        except Exception:
-            return []
-
-        options = []
-        try:
-            cards = self._container_find_elements(price_container, By.CLASS_NAME, "android.widget.FrameLayout")
-        except Exception:
-            cards = []
-
-        cards = [card for card in cards if self._is_clickable(card)]
-
-        # Dump hierarchy once so each _collect_descendant_texts reuses the same tree.
-        cached_xml_root = None
-        if self._using_u2() and cards:
-            try:
-                cached_xml_root = ET.fromstring(self.d.dump_hierarchy())
-            except Exception:
-                pass
-
-        screenshot_path = None
-        if allow_ocr and cards and _MAGICK_BIN and _TESSERACT_BIN:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                    screenshot_path = tmp_file.name
-                if not self._using_u2():
-                    self.driver.get_screenshot_as_file(screenshot_path)
-                else:
-                    self.d.screenshot(screenshot_path)
-            except Exception:
-                screenshot_path = None
-
-        # First pass: collect texts from hierarchy (no ADB round-trips per card).
-        card_data = []
-        ocr_tasks = []  # (card_index, rect) pairs that need OCR
-        for index, card in enumerate(cards):
-            texts = self._collect_descendant_texts(card, xml_root=cached_xml_root)
-            text = self._price_option_text_from_descendants(texts)
-            source = "ui" if text else ""
-            tag = ""
-            for candidate in texts:
-                if candidate in {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}:
-                    tag = candidate
-                    break
-            card_data.append({"index": index, "text": text, "tag": tag, "raw_texts": texts, "source": source})
-            if not text and screenshot_path:
-                ocr_tasks.append((index, self._element_rect(card)))
-
-        # Second pass: OCR in parallel for all cards that need it.
-        ocr_results: dict[int, str] = {}
-        if ocr_tasks and screenshot_path:
-            def _run_ocr(args):
-                idx, rect = args
-                return idx, self._ocr_price_text_from_card(screenshot_path, rect)
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
-                for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
-                    if ocr_text:
-                        ocr_results[idx] = ocr_text
-
-        for entry in card_data:
-            index = entry["index"]
-            if not entry["text"] and index in ocr_results:
-                entry["text"] = ocr_results[index]
-                entry["source"] = "ocr"
-            if not entry["text"] and not entry["tag"]:
-                continue
-            options.append({
-                "index": index,
-                "text": entry["text"],
-                "tag": entry["tag"],
-                "raw_texts": entry["raw_texts"],
-                "source": entry["source"] or "ui",
-            })
-
-        if screenshot_path and os.path.exists(screenshot_path):
-            try:
-                os.unlink(screenshot_path)
-            except OSError:
-                pass
-
-        return options
+        if hasattr(self, "_price_sel"):
+            return self._price_sel.get_visible_price_options(
+                allow_ocr=allow_ocr, xml_root=xml_root
+            )
+        return []
 
     def _get_visible_price_options_from_xml(self, xml_root, allow_ocr=True):
-        """Pure-XML price option scan: zero ADB round-trips except for screenshot."""
-        import concurrent.futures
-
-        # Locate the price container node by resource-id.
-        price_container_node = None
-        for node in xml_root.iter("node"):
-            if node.get("resource-id") == "cn.damai:id/project_detail_perform_price_flowlayout":
-                price_container_node = node
-                break
-        if price_container_node is None:
-            return []
-
-        container_bounds = self._parse_bounds(price_container_node.get("bounds", ""))
-        if not container_bounds:
-            return []
-
-        # Direct children that are clickable FrameLayouts = price cards.
-        card_nodes = [
-            child for child in price_container_node
-            if child.get("class") == "android.widget.FrameLayout"
-            and child.get("clickable") == "true"
-        ]
-        if not card_nodes:
-            return []
-
-        # Screenshot for OCR (one shot).
-        screenshot_path = None
-        if allow_ocr and _MAGICK_BIN and _TESSERACT_BIN:
-            try:
-                with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
-                    screenshot_path = tmp_file.name
-                self.d.screenshot(screenshot_path)
-            except Exception:
-                screenshot_path = None
-
-        _UNAVAILABLE = {"可预约", "预售", "无票", "已预约", "缺货", "售罄", "已售罄", "可选"}
-
-        card_data = []
-        ocr_tasks = []
-        for index, card_node in enumerate(card_nodes):
-            # Collect all descendant texts directly from XML nodes.
-            texts: list[str] = []
-            seen: set[str] = set()
-            for desc in card_node.iter("node"):
-                text = (desc.get("text") or "").strip()
-                if text and text not in seen:
-                    texts.append(text)
-                    seen.add(text)
-
-            price_text = self._price_option_text_from_descendants(texts)
-            source = "ui" if price_text else ""
-            tag = next((c for c in texts if c in _UNAVAILABLE), "")
-
-            card_bounds = self._parse_bounds(card_node.get("bounds", ""))
-            if not price_text and screenshot_path and card_bounds:
-                left, top, right, bottom = card_bounds
-                rect = {"x": left, "y": top, "width": right - left, "height": bottom - top}
-                ocr_tasks.append((index, rect))
-
-            card_data.append({
-                "index": index, "text": price_text, "tag": tag,
-                "raw_texts": texts, "source": source,
-            })
-
-        # Parallel OCR for cards whose price text wasn't in the UI tree.
-        ocr_results: dict[int, str] = {}
-        if ocr_tasks and screenshot_path:
-            def _run_ocr(args):
-                idx, rect = args
-                return idx, self._ocr_price_text_from_card(screenshot_path, rect)
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(ocr_tasks), 4)) as executor:
-                for idx, ocr_text in executor.map(_run_ocr, ocr_tasks):
-                    if ocr_text:
-                        ocr_results[idx] = ocr_text
-
-        options = []
-        for entry in card_data:
-            idx = entry["index"]
-            if not entry["text"] and idx in ocr_results:
-                entry["text"] = ocr_results[idx]
-                entry["source"] = "ocr"
-            if not entry["text"] and not entry["tag"]:
-                continue
-            options.append({
-                "index": idx,
-                "text": entry["text"],
-                "tag": entry["tag"],
-                "raw_texts": entry["raw_texts"],
-                "source": entry["source"] or "ui",
-            })
-
-        if screenshot_path and os.path.exists(screenshot_path):
-            try:
-                os.unlink(screenshot_path)
-            except OSError:
-                pass
-
-        return options
+        if hasattr(self, "_price_sel"):
+            return self._price_sel._get_visible_price_options_from_xml(
+                xml_root, allow_ocr=allow_ocr
+            )
+        return []
 
     def _get_detail_venue_text(self, xml_root=None):
         """Read venue text from the detail page if present."""
         if xml_root is not None and self._using_u2():
-            for resource_id in ("cn.damai:id/venue_name_0", "cn.damai:id/tv_project_venueName"):
+            for resource_id in (
+                "cn.damai:id/venue_name_0",
+                "cn.damai:id/tv_project_venueName",
+            ):
                 value = self._xml_find_text_by_resource_id(xml_root, resource_id)
                 if value:
                     return value.strip()
             return ""
 
-        for resource_id in ("cn.damai:id/venue_name_0", "cn.damai:id/tv_project_venueName"):
+        for resource_id in (
+            "cn.damai:id/venue_name_0",
+            "cn.damai:id/tv_project_venueName",
+        ):
             value = self._safe_element_text(self.driver, By.ID, resource_id)
             if value:
                 return value.strip()
@@ -2898,23 +1287,22 @@ class DamaiBot:
             return page_probe
 
         book_selectors = [
-            (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-            (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
+            (
+                By.ID,
+                "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+            ),
+            (
+                ANDROID_UIAUTOMATOR,
+                'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")',
+            ),
             (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]'),
         ]
-        if not self.smart_wait_and_click(*book_selectors[0], book_selectors[1:], timeout=0.5):
+        if not self.smart_wait_and_click(
+            *book_selectors[0], book_selectors[1:], timeout=0.5
+        ):
             return self.probe_current_page()
 
         return self._wait_for_purchase_entry_result(timeout=5, poll_interval=0.04)
-
-    def _dump_hierarchy_xml(self):
-        """Return a parsed ET root for the current UI hierarchy, or None on error."""
-        if not self._using_u2():
-            return None
-        try:
-            return ET.fromstring(self.d.dump_hierarchy())
-        except Exception:
-            return None
 
     def inspect_current_target_event(self, page_probe=None):
         """Summarize the currently opened event for prompt-based confirmation."""
@@ -2926,15 +1314,25 @@ class DamaiBot:
         if page_probe["state"] == "detail_page":
             # Click buy immediately so sku_page starts loading before we do anything else.
             book_selectors = [
-                (By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")'),
+                (
+                    By.ID,
+                    "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl",
+                ),
+                (
+                    ANDROID_UIAUTOMATOR,
+                    'new UiSelector().textMatches(".*预约.*|.*购买.*|.*立即.*")',
+                ),
                 (By.XPATH, '//*[contains(@text,"预约") or contains(@text,"购买")]'),
             ]
-            clicked = self.smart_wait_and_click(*book_selectors[0], book_selectors[1:], timeout=0.5)
+            clicked = self.smart_wait_and_click(
+                *book_selectors[0], book_selectors[1:], timeout=0.5
+            )
             # Dump detail_page hierarchy while sku_page loads (~1.5s parallel time).
             xml_root = self._dump_hierarchy_xml()
             if clicked:
-                sku_probe = self._wait_for_purchase_entry_result(timeout=4.0, poll_interval=0.04)
+                sku_probe = self._wait_for_purchase_entry_result(
+                    timeout=4.0, poll_interval=0.04
+                )
             else:
                 sku_probe = self.probe_current_page()
         elif page_probe["state"] != "sku_page":
@@ -2962,23 +1360,39 @@ class DamaiBot:
 
         return summary
 
-    def probe_current_page(self):
+    def probe_current_page(self, fast=False):
         """探测当前页面状态和关键控件可见性。"""
+        # Delegate to PageProbe when available (u2 backend)
+        if hasattr(self, "_page_probe"):
+            result = self._page_probe.probe_current_page(fast=fast)
+            if result["state"] != "unknown" or fast:
+                logger.info(f"当前页面状态: {result['state']}")
+                return result
+
+        # Fallback: element-based probe using _has_element
+        return self._probe_current_page_element_based()
+
+    def _probe_current_page_element_based(self):
+        """Full probe using _has_element calls (fallback when PageProbe unavailable)."""
         state = "unknown"
         current_activity = self._get_current_activity()
-        purchase_button = self._has_element(By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl")
-        detail_price_summary = self._has_element(By.ID, "cn.damai:id/project_detail_price_layout")
-        sku_price_container = self._has_element(By.ID, "cn.damai:id/project_detail_perform_price_flowlayout") or \
-            self._has_element(By.ID, "cn.damai:id/layout_price") or \
-            self._has_element(By.ID, "cn.damai:id/tv_price_name")
+        purchase_button = self._has_element(
+            By.ID, "cn.damai:id/trade_project_detail_purchase_status_bar_container_fl"
+        )
+        detail_price_summary = self._has_element(
+            By.ID, "cn.damai:id/project_detail_price_layout"
+        )
+        sku_price_container = (
+            self._has_element(
+                By.ID, "cn.damai:id/project_detail_perform_price_flowlayout"
+            )
+            or self._has_element(By.ID, "cn.damai:id/layout_price")
+            or self._has_element(By.ID, "cn.damai:id/tv_price_name")
+        )
         quantity_picker = self._has_element(By.ID, "layout_num")
-        submit_button = self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")')
+        submit_button = self._has_element(By.ID, "cn.damai:id/checkbox")
         pending_order_dialog = self._has_element(
-            AppiumBy.ANDROID_UIAUTOMATOR,
-            'new UiSelector().textContains("未支付订单")',
-        ) or (
-            self._has_element(By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn")
-            and self._has_element(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textContains("查看订单")')
+            By.ID, "cn.damai:id/damai_theme_dialog_confirm_btn"
         )
         reservation_mode = False
 
@@ -2986,20 +1400,32 @@ class DamaiBot:
             state = "consent_dialog"
         elif pending_order_dialog:
             state = "pending_order_dialog"
-        elif "MainActivity" in current_activity or \
-                self._has_element(By.ID, "cn.damai:id/homepage_header_search") or \
-                self._has_element(By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"):
+        elif (
+            "MainActivity" in current_activity
+            or self._has_element(By.ID, "cn.damai:id/homepage_header_search")
+            or self._has_element(
+                By.ID, "cn.damai:id/pioneer_homepage_header_search_btn"
+            )
+        ):
             state = "homepage"
-        elif "SearchActivity" in current_activity or self._has_element(By.ID, "cn.damai:id/header_search_v2_input"):
+        elif "SearchActivity" in current_activity or self._has_element(
+            By.ID, "cn.damai:id/header_search_v2_input"
+        ):
             state = "search_page"
         elif submit_button:
             state = "order_confirm_page"
-        elif "NcovSkuActivity" in current_activity or \
-                self._has_element(By.ID, "cn.damai:id/layout_sku") or \
-                self._has_element(By.ID, "cn.damai:id/sku_contanier"):
+        elif (
+            "NcovSkuActivity" in current_activity
+            or self._has_element(By.ID, "cn.damai:id/layout_sku")
+            or self._has_element(By.ID, "cn.damai:id/sku_contanier")
+        ):
             state = "sku_page"
-        elif "ProjectDetailActivity" in current_activity or purchase_button or detail_price_summary or \
-                self._has_element(By.ID, "cn.damai:id/title_tv"):
+        elif (
+            "ProjectDetailActivity" in current_activity
+            or purchase_button
+            or detail_price_summary
+            or self._has_element(By.ID, "cn.damai:id/title_tv")
+        ):
             state = "detail_page"
 
         if state == "sku_page":
@@ -3031,203 +1457,29 @@ class DamaiBot:
 
     def _has_warm_pipeline_coords(self):
         """Check if all coordinates required for the blind pipeline are cached."""
+        if hasattr(self, "_pipeline"):
+            return self._pipeline.has_warm_coords()
         c = self._cached_hot_path_coords
-        return all([
-            c.get("detail_buy"),
-            c.get("price"),
-            c.get("sku_buy"),
-            c.get("attendee_checkboxes"),
-        ])
+        return all(
+            [
+                c.get("detail_buy"),
+                c.get("price"),
+                c.get("sku_buy"),
+                c.get("attendee_checkboxes"),
+            ]
+        )
 
     def _run_cold_validation_pipeline(self, start_time):
-        """Fast cold validation: XML dump → shell batch → concurrent polling.
-
-        Handles the first-ever run when no cached coordinates exist.  Uses a
-        single detail-page XML dump to extract city/buy coords, then a single
-        SKU-page XML dump to extract price/sku_buy coords.  After each dump,
-        clicks are batched via ``self.d.shell`` and the next page transition is
-        detected with concurrent polling — the same strategy as the warm
-        pipeline, just with an extra XML dump to obtain the missing coords.
-
-        Returns True on success, None to fall back to the normal flow.
-        """
-        # --- Phase 1: detail page — XML dump for city/buy coords, shell batch click ---
-        if not self._rush_preselect_and_buy_via_xml():
-            return None
-
-        # --- Phase 2: poll for SKU page ---
-        logger.info("选择票价...")
-        sku_deadline = time.time() + 6.0
-        sku_detected = False
-        while time.time() < sku_deadline:
-            if self._has_element(By.ID, "cn.damai:id/layout_sku"):
-                sku_detected = True
-                break
-        if not sku_detected:
-            # May have jumped straight to confirm page (e.g. single-price event).
-            if self._has_element(By.ID, "cn.damai:id/checkbox"):
-                return self._cold_pipeline_finish_confirm(start_time)
-            return None
-
-        # --- Phase 3: SKU page — single XML dump for price + sku_buy coords ---
-        sku_xml = self._dump_hierarchy_xml()
-        if sku_xml is None:
-            return None
-        price_coords = self._get_price_option_coordinates_by_config_index(xml_root=sku_xml)
-        sku_buy_coords = self._get_buy_button_coordinates(xml_root=sku_xml)
-        if not price_coords or not sku_buy_coords:
-            return None
-
-        # Cache for future warm-pipeline runs.
-        self._cached_hot_path_coords["price"] = price_coords
-        self._cached_hot_path_coords["sku_buy"] = sku_buy_coords
-
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        logger.info("选择数量...")
-        logger.info("确定购买...")
-
-        # --- Phase 4: shell batch price + buy, concurrent poll for confirm ---
-        px, py = int(price_coords[0]), int(price_coords[1])
-        bx, by = int(sku_buy_coords[0]), int(sku_buy_coords[1])
-        # Fire the initial price + buy clicks via shell.
-        self.d.shell(f"input tap {px} {py}; input tap {bx} {by}")
-
-        # Background blind clicker keeps retrying in case the first tap was too early.
-        stop_event = threading.Event()
-        tap_cmd = f"input tap {px} {py}; input tap {bx} {by}"
-
-        def _blind_click_loop():
-            while not stop_event.is_set():
-                try:
-                    self.d.shell(tap_cmd)
-                except Exception:
-                    pass
-                if stop_event.wait(timeout=0.02):
-                    break
-
-        clicker = threading.Thread(target=_blind_click_loop, daemon=True)
-        clicker.start()
-
-        confirmed = False
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            if self._has_element(By.ID, "cn.damai:id/checkbox"):
-                confirmed = True
-                break
-
-        stop_event.set()
-        clicker.join(timeout=0.3)
-
-        if not confirmed:
-            return None
-
-        return self._cold_pipeline_finish_confirm(start_time)
+        self._ensure_pipeline()
+        return self._pipeline.run_cold_validation(start_time)
 
     def _cold_pipeline_finish_confirm(self, start_time):
-        """Shared tail for the cold pipeline: select attendees on confirm page."""
-        required_count = max(1, len(self.config.users or []))
-        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
-        logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-
-        # Find and click attendee checkboxes (also caches coords for warm pipeline).
-        checkbox_elements = self._attendee_checkbox_elements()
-        if checkbox_elements:
-            _coords = []
-            for el in checkbox_elements:
-                try:
-                    bt = getattr(el, "bounds", None)
-                    if isinstance(bt, (list, tuple)) and len(bt) == 4:
-                        left, top, right, bottom = [int(v) for v in bt]
-                        _coords.append(((left + right) // 2, (top + bottom) // 2))
-                except Exception:
-                    pass
-            if _coords:
-                self._cached_hot_path_coords["attendee_checkboxes"] = _coords
-            for checkbox in checkbox_elements[:required_count]:
-                self._click_attendee_checkbox_fast(checkbox)
-
-        self._set_run_outcome("validation_ready")
-        logger.info("if_commit_order=False，已完成观演人勾选，停止在\"立即提交\"前")
-        logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒")
-        return True
+        self._ensure_pipeline()
+        return self._pipeline._finish_confirm(start_time)
 
     def _run_warm_validation_pipeline(self, start_time):
-        """Ultra-fast warm validation: blind shell clicks + concurrent polling.
-
-        Instead of sequential wait→click→wait→click, this fires cached
-        coordinate clicks via ``input tap`` in a background thread while
-        the main thread polls for the confirm page with a single fast
-        selector.  This overlaps app page transitions with speculative
-        clicks, eliminating the SKU-detection phase entirely.
-
-        Returns True on success, None to fall back to the normal flow.
-        """
-        coords = self._cached_hot_path_coords
-        no_match = self._cached_hot_path_no_match
-
-        detail_buy = coords["detail_buy"]
-        price = coords["price"]
-        sku_buy = coords["sku_buy"]
-        attendees = coords["attendee_checkboxes"]
-        city = coords.get("city")
-        required_count = max(1, len(self.config.users or []))
-
-        # --- Step 1: city preselect + detail_buy via batched shell --------
-        tap_cmds = []
-        if city and "city" not in no_match:
-            tap_cmds.append(f"input tap {int(city[0])} {int(city[1])}")
-            logger.info(f"极速模式预选城市: {self.config.city}")
-        logger.info("点击购票按钮...")
-        tap_cmds.append(f"input tap {int(detail_buy[0])} {int(detail_buy[1])}")
-        self.d.shell("; ".join(tap_cmds))
-
-        # --- Step 2: background blind clicker ----------------------------
-        stop_event = threading.Event()
-        px, py = int(price[0]), int(price[1])
-        bx, by = int(sku_buy[0]), int(sku_buy[1])
-        tap_cmd = f"input tap {px} {py}; input tap {bx} {by}"
-
-        def _blind_click_loop():
-            while not stop_event.is_set():
-                try:
-                    self.d.shell(tap_cmd)
-                except Exception:
-                    pass
-                if stop_event.wait(timeout=0.02):
-                    break
-
-        clicker = threading.Thread(target=_blind_click_loop, daemon=True)
-        clicker.start()
-
-        # --- Step 3: main thread polls for confirm page ------------------
-        logger.info("选择票价...")
-        logger.info(f"通过配置索引直接选择票价: price_index={self.config.price_index}")
-        logger.info("选择数量...")
-        logger.info("确定购买...")
-
-        confirmed = False
-        deadline = time.time() + 8.0
-        while time.time() < deadline:
-            if self._has_element(By.ID, "cn.damai:id/checkbox"):
-                confirmed = True
-                break
-
-        stop_event.set()
-        clicker.join(timeout=0.3)
-
-        if not confirmed:
-            return None
-
-        # --- Step 4: click attendees -------------------------------------
-        logger.info(f"检测到观演人未选择完成，尝试自动补选（已选 0/{required_count}）")
-        logger.info("开发验证极速路径：按勾选框顺序快速补选观演人")
-        for c in attendees[:required_count]:
-            self._click_coordinates(*c)
-
-        self._set_run_outcome("validation_ready")
-        logger.info("if_commit_order=False，已完成观演人勾选，停止在\"立即提交\"前")
-        logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {time.time() - start_time:.2f}秒")
-        return True
+        self._ensure_pipeline()
+        return self._pipeline.run_warm_validation(start_time)
 
     def run_ticket_grabbing(self, initial_page_probe=None):
         """执行抢票主流程"""
@@ -3236,7 +1488,7 @@ class DamaiBot:
             self._terminal_failure_reason = None
             self._last_run_outcome = None
             self._log_execution_mode()
-            page_probe = initial_page_probe or self.probe_current_page()
+            page_probe = initial_page_probe or self.probe_current_page(fast=True)
             fast_validation_hot_path = (
                 self.config.rush_mode
                 and not self.config.if_commit_order
@@ -3244,7 +1496,9 @@ class DamaiBot:
                 and page_probe["state"] in {"detail_page", "sku_page"}
             )
             if fast_validation_hot_path:
-                logger.info("开发验证极速路径：跳过启动弹窗与登录探测，直接执行抢票热路径")
+                logger.info(
+                    "开发验证极速路径：跳过启动弹窗与登录探测，直接执行抢票热路径"
+                )
                 if page_probe["state"] == "detail_page":
                     if self._has_warm_pipeline_coords():
                         # Warm pipeline: blind shell clicks + concurrent polling.
@@ -3256,7 +1510,12 @@ class DamaiBot:
                         pipeline_result = None
                     if pipeline_result is True:
                         return True
-                    # pipeline_result is None → fall through to normal flow
+                    if pipeline_result is False:
+                        return False
+                    # pipeline_result is None → fall through to normal flow.
+                    # Refresh page_probe since the pipeline may have advanced
+                    # the app state (e.g. from detail_page to sku_page).
+                    page_probe = self.probe_current_page(fast=True)
             else:
                 self.dismiss_startup_popups()
                 if not self.check_session_valid():
@@ -3265,11 +1524,14 @@ class DamaiBot:
 
             if page_probe["state"] == "pending_order_dialog":
                 self._set_run_outcome("order_pending_payment")
-                logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+                logger.info(
+                    "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
+                )
                 return True
 
-            if page_probe["state"] not in {"detail_page", "sku_page"} or \
-                    (self.item_detail and not self._current_page_matches_target(page_probe)):
+            if page_probe["state"] not in {"detail_page", "sku_page"} or (
+                self.item_detail and not self._current_page_matches_target(page_probe)
+            ):
                 if self.config.auto_navigate:
                     logger.info("当前不在目标演出页，尝试自动导航")
                     if not self.navigate_to_target_event(page_probe):
@@ -3277,19 +1539,29 @@ class DamaiBot:
                     page_probe = self.probe_current_page()
                     if page_probe["state"] == "pending_order_dialog":
                         self._set_run_outcome("order_pending_payment")
-                        logger.info("检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付")
+                        logger.info(
+                            "检测到未支付订单弹窗（已占单待支付），请立即前往订单页完成支付"
+                        )
                         return True
                 else:
                     logger.warning("当前不在演出详情页，请先手动打开目标演出详情页")
                     return False
 
             if self.config.probe_only:
-                detail_ready = page_probe["state"] == "detail_page" and page_probe["purchase_button"] and page_probe["price_container"]
-                sku_ready = page_probe["state"] == "sku_page" and page_probe["price_container"]
+                detail_ready = (
+                    page_probe["state"] == "detail_page"
+                    and page_probe["purchase_button"]
+                    and page_probe["price_container"]
+                )
+                sku_ready = (
+                    page_probe["state"] == "sku_page" and page_probe["price_container"]
+                )
 
                 if detail_ready or sku_ready:
                     self._set_run_outcome("probe_ready")
-                    logger.info("probe_only 模式: 详情页关键控件已就绪，停止在购票点击前")
+                    logger.info(
+                        "probe_only 模式: 详情页关键控件已就绪，停止在购票点击前"
+                    )
                     end_time = time.time()
                     logger.info(f"探测完成，耗时: {end_time - start_time:.2f}秒")
                     return True
@@ -3298,11 +1570,11 @@ class DamaiBot:
                 return False
 
             prepared_detail_page = False
-            should_prepare_detail_page = (
-                page_probe["state"] == "detail_page"
-                and (
-                    self.config.sell_start_time is not None
-                    or (self.config.wait_cta_ready_timeout_ms > 0 and not self.config.rush_mode)
+            should_prepare_detail_page = page_probe["state"] == "detail_page" and (
+                self.config.sell_start_time is not None
+                or (
+                    self.config.wait_cta_ready_timeout_ms > 0
+                    and not self.config.rush_mode
                 )
             )
             if should_prepare_detail_page:
@@ -3316,7 +1588,9 @@ class DamaiBot:
                 page_probe = self.probe_current_page()
 
             if page_probe["state"] == "detail_page":
-                page_probe = self._enter_purchase_flow_from_detail_page(prepared=prepared_detail_page)
+                page_probe = self._enter_purchase_flow_from_detail_page(
+                    prepared=prepared_detail_page
+                )
                 if page_probe is None:
                     return False
             else:
@@ -3325,7 +1599,9 @@ class DamaiBot:
                 if self.config.rush_mode and not self.config.if_commit_order:
                     logger.info("开发验证极速路径：已在票档页，跳过场次切换")
                 else:
-                    self.select_performance_date(timeout=0.35 if self.config.rush_mode else 1.0)
+                    self.select_performance_date(
+                        timeout=0.35 if self.config.rush_mode else 1.0
+                    )
                 if self.config.rush_mode:
                     # 极速模式下避免一次完整重探测，减少热路径阻塞。
                     page_probe = dict(page_probe)
@@ -3342,8 +1618,12 @@ class DamaiBot:
                 self._set_terminal_failure("reservation_only")
                 return False
 
-            price_coords = page_probe.get("price_coords") if self.config.rush_mode else None
-            buy_button_coords = page_probe.get("buy_button_coords") if self.config.rush_mode else None
+            price_coords = (
+                page_probe.get("price_coords") if self.config.rush_mode else None
+            )
+            buy_button_coords = (
+                page_probe.get("buy_button_coords") if self.config.rush_mode else None
+            )
             # 热路径优先从 bot 级缓存读取坐标，避免重复 XML dump（热重试节省 ~0.5s）。
             if self.config.rush_mode:
                 if price_coords is None:
@@ -3355,9 +1635,15 @@ class DamaiBot:
                     # Single hierarchy dump shared by both coordinate captures (~0.5s vs 4s+).
                     _sku_xml = self._dump_hierarchy_xml()
                     if price_coords is None:
-                        price_coords = self._get_price_option_coordinates_by_config_index(xml_root=_sku_xml)
+                        price_coords = (
+                            self._get_price_option_coordinates_by_config_index(
+                                xml_root=_sku_xml
+                            )
+                        )
                     if buy_button_coords is None:
-                        buy_button_coords = self._get_buy_button_coordinates(xml_root=_sku_xml)
+                        buy_button_coords = self._get_buy_button_coordinates(
+                            xml_root=_sku_xml
+                        )
             # 更新 bot 级缓存供后续热重试使用。
             if self.config.rush_mode:
                 if price_coords is not None:
@@ -3387,8 +1673,8 @@ class DamaiBot:
                         plus_button = self._find(By.ID, "img_jia")
                         for i in range(clicks_needed):
                             rect = self._element_rect(plus_button)
-                            x = rect['x'] + rect['width'] // 2
-                            y = rect['y'] + rect['height'] // 2
+                            x = rect["x"] + rect["width"] // 2
+                            y = rect["y"] + rect["height"] // 2
                             self._click_coordinates(x, y, duration=50)
                             time.sleep(0.02)
                     except Exception as e:
@@ -3398,58 +1684,126 @@ class DamaiBot:
             #     for i in range(len(self.config.users) - 1):
             #         self.driver.find_element(by=By.ID, value='img_jia').click()
 
-            # 5. 确定购买
+            # 5. 确定购买 — brief wait for price selection to register.
+            # Damai App ignores confirm clicks until btn_buy_view becomes clickable (price > 0).
+            time.sleep(0.5)
             logger.info("确定购买...")
-            if self.config.rush_mode and buy_button_coords:
-                burst_count = 1 if not self.config.if_commit_order else 2
-                self._burst_click_coordinates(*buy_button_coords, count=burst_count, interval_ms=25, duration=25)
-                buy_clicked = True
-            elif self.config.rush_mode:
-                try:
-                    buy_button = self._find(By.ID, "cn.damai:id/btn_buy_view")
-                    burst_count = 1 if not self.config.if_commit_order else 2
-                    self._burst_click_element_center(buy_button, count=burst_count, interval_ms=25, duration=25)
-                    buy_clicked = True
-                except Exception:
-                    buy_clicked = False
-            else:
-                buy_clicked = False
-
-            if not buy_clicked and not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
-                # 备用按钮文本
-                self.ultra_fast_click(AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*确定.*|.*购买.*")')
-
-            submit_ready = self._wait_for_submit_ready(
-                timeout=4.0 if self.config.rush_mode else 1.8,
-                poll_interval=0.03 if self.config.rush_mode else 0.05,
-            )
+            submit_ready = False
+            confirm_deadline = time.time() + (4.0 if self.config.rush_mode else 1.8)
+            confirm_attempt = 0
+            while time.time() < confirm_deadline and not submit_ready:
+                confirm_attempt += 1
+                if self.config.rush_mode and buy_button_coords:
+                    if confirm_attempt == 1:
+                        burst_count = 1 if not self.config.if_commit_order else 2
+                        self._burst_click_coordinates(
+                            *buy_button_coords,
+                            count=burst_count,
+                            interval_ms=25,
+                            duration=25,
+                        )
+                    else:
+                        burst_count = 1 if not self.config.if_commit_order else 2
+                        if not self._click_sku_buy_button_element(
+                            burst_count=burst_count
+                        ):
+                            self._burst_click_coordinates(
+                                *buy_button_coords,
+                                count=burst_count,
+                                interval_ms=25,
+                                duration=25,
+                            )
+                elif self.config.rush_mode:
+                    # Element click may not work on Damai's custom btn_buy_view —
+                    # use coordinate click from XML bounds as primary method.
+                    _buy_coords = self._get_buy_button_coordinates()
+                    if _buy_coords:
+                        burst_count = 1 if not self.config.if_commit_order else 2
+                        self._burst_click_coordinates(
+                            *_buy_coords, count=burst_count, interval_ms=25, duration=25
+                        )
+                        buy_button_coords = _buy_coords  # cache for next retry
+                    else:
+                        burst_count = 1 if not self.config.if_commit_order else 2
+                        if not self._click_sku_buy_button_element(
+                            burst_count=burst_count
+                        ):
+                            try:
+                                buy_button = self._find(
+                                    By.ID, "cn.damai:id/btn_buy_view"
+                                )
+                                self._burst_click_element_center(
+                                    buy_button,
+                                    count=burst_count,
+                                    interval_ms=25,
+                                    duration=25,
+                                )
+                            except Exception:
+                                self.ultra_fast_click(
+                                    By.ID, "cn.damai:id/btn_buy_view"
+                                )
+                else:
+                    if not self.ultra_fast_click(By.ID, "cn.damai:id/btn_buy_view"):
+                        self.ultra_fast_click(
+                            ANDROID_UIAUTOMATOR,
+                            'new UiSelector().textMatches(".*确定.*|.*购买.*")',
+                        )
+                # Short wait then check if confirm page appeared
+                remaining = confirm_deadline - time.time()
+                check_timeout = min(1.0, max(0.1, remaining))
+                submit_ready = self._wait_for_submit_ready(
+                    timeout=check_timeout,
+                    poll_interval=0.03 if self.config.rush_mode else 0.05,
+                )
+                if not submit_ready and confirm_attempt < 5:
+                    logger.debug(f"确定按钮第 {confirm_attempt} 次点击未生效，重试...")
+                # Every 3rd attempt, check if buy button shows sold-out text.
+                if not submit_ready and confirm_attempt % 3 == 0:
+                    if self._is_buy_button_sold_out():
+                        logger.warning(
+                            "购买按钮区域检测到缺货/售罄标识，该票档当前不可购买"
+                        )
+                        self._set_terminal_failure("sold_out")
+                        return False
             if not submit_ready:
                 if self.config.rush_mode and not self.config.if_commit_order:
-                    logger.info("开发验证极速路径：确认页未完全就绪，跳过预选用户兜底，直接校验观演人区域")
+                    logger.info(
+                        "开发验证极速路径：确认页未完全就绪，跳过预选用户兜底，直接校验观演人区域"
+                    )
                 else:
                     # 6. 批量选择用户
                     logger.info("选择用户...")
-                    user_clicks = [(AppiumBy.ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")') for user in
-                                   self.config.users]
+                    user_clicks = [
+                        (ANDROID_UIAUTOMATOR, f'new UiSelector().text("{user}")')
+                        for user in self.config.users
+                    ]
                     user_timeout = 0.35 if self.config.rush_mode else 1.0
-                    clicked_users = self.ultra_batch_click(user_clicks, timeout=user_timeout)
+                    clicked_users = self.ultra_batch_click(
+                        user_clicks, timeout=user_timeout
+                    )
                     if clicked_users:
                         submit_ready = self._wait_for_submit_ready(
                             timeout=0.9 if self.config.rush_mode else 1.5,
                             poll_interval=0.03 if self.config.rush_mode else 0.05,
                         )
 
-            if not submit_ready and not (self.config.rush_mode and not self.config.if_commit_order):
+            if not submit_ready and not (
+                self.config.rush_mode and not self.config.if_commit_order
+            ):
                 logger.warning("未进入订单确认页，请检查票档可用性或观演人配置")
                 return False
 
             submit_selectors = [
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
-                (AppiumBy.ANDROID_UIAUTOMATOR, 'new UiSelector().textMatches(".*提交.*|.*确认.*")'),
-                (By.XPATH, '//*[contains(@text,"提交")]')
+                (ANDROID_UIAUTOMATOR, 'new UiSelector().text("立即提交")'),
+                (
+                    ANDROID_UIAUTOMATOR,
+                    'new UiSelector().textMatches(".*提交.*|.*确认.*")',
+                ),
+                (By.XPATH, '//*[contains(@text,"提交")]'),
             ]
             if not self._ensure_attendees_selected_on_confirm_page(
-                require_attendee_section=self.config.rush_mode and not self.config.if_commit_order
+                require_attendee_section=self.config.rush_mode
+                and not self.config.if_commit_order
             ):
                 self._set_terminal_failure("attendee_unselected")
                 logger.error("订单提交前观演人未选择完整，已停止自动提交")
@@ -3458,8 +1812,12 @@ class DamaiBot:
             if not self.config.if_commit_order:
                 self._set_run_outcome("validation_ready")
                 end_time = time.time()
-                logger.info("if_commit_order=False，已完成观演人勾选，停止在“立即提交”前")
-                logger.info(f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {end_time - start_time:.2f}秒")
+                logger.info(
+                    "if_commit_order=False，已完成观演人勾选，停止在“立即提交”前"
+                )
+                logger.info(
+                    f"已到订单确认页且观演人已勾选，未提交订单（开发验证），耗时: {end_time - start_time:.2f}秒"
+                )
                 return True
 
             # 7. 提交订单
@@ -3505,7 +1863,9 @@ class DamaiBot:
                 return True
 
             if self._terminal_failure_reason:
-                logger.error(f"检测到不可重试失败，停止后续重试: {self._terminal_failure_reason}")
+                logger.error(
+                    f"检测到不可重试失败，停止后续重试: {self._terminal_failure_reason}"
+                )
                 break
 
             # Fast retry within same session
@@ -3520,7 +1880,9 @@ class DamaiBot:
                     self._log_success_outcome("快速重试成功：")
                     return True
                 if self._terminal_failure_reason:
-                    logger.error(f"快速重试遇到不可重试失败，停止后续重试: {self._terminal_failure_reason}")
+                    logger.error(
+                        f"快速重试遇到不可重试失败，停止后续重试: {self._terminal_failure_reason}"
+                    )
                     break
 
             if self._terminal_failure_reason:
